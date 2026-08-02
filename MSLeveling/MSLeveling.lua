@@ -1,11 +1,16 @@
 local ADDON_NAME = "MSLeveling"
 local PREFIX = "|cff66b3ff[MSL]|r "
+local REPLY_HELP = "Hello! This is the MS-Leveling addon by Bokuden (https://github.com/BokudenWow/MS-Leveling). To sign up, whisper your role and whether you have aura, e.g. 'tank with aura', 'heal without aura' or 'dps'. You'll be added to the candidate list automatically."
+local REPLY_OK = "Automatically added to the candidate list. Bokuden blesses you!"
 
 MSLevelingDB = MSLevelingDB or {}
 local db = MSLevelingDB
 
 db.channels = db.channels or { 1, 8, 0 }
 db.me = db.me or {}
+if db.autoReply == nil then
+	db.autoReply = true
+end
 
 local MAX_TANK, MAX_HEAL, MAX_DPS, MAX_AURA, MAX_TOTAL = 2, 3, 10, 3, 15
 local ROW_HEIGHT = 22
@@ -328,10 +333,10 @@ function LoadRaid()
 	wipe(INVITED)
 	wipe(memberReplies)
 	collecting = true
-	collectUntil = GetTime() + 15
+	collectUntil = GetTime() + 20
 	SendChatMessage("MSLeveling: reply with '1' Tank, '2' Heal, '3' Aura (e.g. '1 3'). No reply = DPS without aura.", "RAID_WARNING")
 	RefreshAll()
-	print(PREFIX .. "Raid started: reply in raid chat with 1 (Tank), 2 (Heal), 3 (Aura), e.g. '1 3'. Collecting for 15s.")
+	print(PREFIX .. "Raid started: reply in raid chat with 1 (Tank), 2 (Heal), 3 (Aura), e.g. '1 3'. Collecting for 20s.")
 end
 
 local function FinalizeCollect()
@@ -358,6 +363,33 @@ local function FinalizeCollect()
 		end
 	end
 	wipe(memberReplies)
+	local t, h, d, a = GetCounts()
+	SendChatMessage(string.format("MSLeveling: Group ready: {circle}%d Tank {square}%d Heal {skull}%d DPS {triangle}%d Aura", t, h, d, a), "RAID")
+	local tanks, heals, auras = {}, {}, {}
+	local pn = UnitName("player") or "?"
+	if db.me.role == "Tank" then
+		table.insert(tanks, pn)
+	end
+	if db.me.role == "Heal" then
+		table.insert(heals, pn)
+	end
+	if db.me.aura then
+		table.insert(auras, pn)
+	end
+	for _, inv in ipairs(INVITED) do
+		if inv.role == "Tank" then
+			table.insert(tanks, inv.name)
+		end
+		if inv.role == "Heal" then
+			table.insert(heals, inv.name)
+		end
+		if inv.aura then
+			table.insert(auras, inv.name)
+		end
+	end
+	SendChatMessage("MSLeveling: Tanks: " .. (#tanks > 0 and table.concat(tanks, ", ") or "none"), "RAID")
+	SendChatMessage("MSLeveling: Heals: " .. (#heals > 0 and table.concat(heals, ", ") or "none"), "RAID")
+	SendChatMessage("MSLeveling: Auras: " .. (#auras > 0 and table.concat(auras, ", ") or "none"), "RAID")
 	print(PREFIX .. string.format("Raid collected: %d players (DPS without aura by default).", count))
 	RefreshAll()
 end
@@ -521,11 +553,18 @@ function HandleWhisper(msg, author)
 			MergeReply(name, role, aura)
 			local rep = memberReplies[name]
 			print(PREFIX .. name .. " replied (" .. rep.role .. (rep.aura and " - Aura" or " - Without aura") .. ")")
+			if db.autoReply then
+				SendChatMessage(REPLY_OK, "WHISPER", nil, name)
+			end
 		end
 		return
 	end
 	if not role and aura == nil then
-		SendChatMessage("Hello! This is a private MSLevel addon. If you'd like it, just ask me in English. Thanks!", "WHISPER", nil, name)
+		if db.autoReply then
+			SendChatMessage(REPLY_HELP, "WHISPER", nil, name)
+		end
+	elseif db.autoReply then
+		SendChatMessage(REPLY_OK, "WHISPER", nil, name)
 	end
 	local inv = FindInvited(name)
 	if inv then
@@ -776,6 +815,16 @@ resetBtn:SetPoint("LEFT", raidBtn, "RIGHT", 6, 0)
 resetBtn:SetText("Reset")
 resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSLEVELING_RESET")
+end)
+
+local autoBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+autoBtn:SetSize(104, 22)
+autoBtn:SetPoint("LEFT", resetBtn, "RIGHT", 6, 0)
+autoBtn:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
+autoBtn:SetScript("OnClick", function(self)
+	db.autoReply = not db.autoReply
+	self:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
+	print(PREFIX .. "Automatic whisper reply: " .. (db.autoReply and "enabled" or "disabled"))
 end)
 
 local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
