@@ -28,12 +28,15 @@ local ROLE_COLORS = {
 	["?"] = { 0.7, 0.7, 0.7 },
 }
 
-local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows
-local HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat
+local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows, finishBtn, title
+local HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups
 
 local collecting = false
-local collectUntil = 0
 local memberReplies = {}
+local pendingSort = false
+local sortRunning = false
+local sortElapsed = 0
+local sortTickFrame
 
 local addon = CreateFrame("Frame")
 addon:RegisterEvent("CHAT_MSG_WHISPER")
@@ -41,6 +44,7 @@ addon:RegisterEvent("CHAT_MSG_RAID")
 addon:RegisterEvent("CHAT_MSG_RAID_WARNING")
 addon:RegisterEvent("CHAT_MSG_PARTY")
 addon:RegisterEvent("GROUP_ROSTER_UPDATE")
+addon:RegisterEvent("PLAYER_REGEN_ENABLED")
 addon:RegisterEvent("PLAYER_LOGIN")
 addon:SetScript("OnEvent", function(self, event, ...)
 	if event == "CHAT_MSG_WHISPER" then
@@ -55,6 +59,13 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		if RefreshStatus then
 			RefreshStatus()
 		end
+	elseif event == "PLAYER_REGEN_ENABLED" then
+		if pendingSort then
+			pendingSort = false
+			if SortGroups then
+				SortGroups()
+			end
+		end
 	elseif event == "PLAYER_LOGIN" then
 		if db.framePos and type(db.framePos) == "table" and f then
 			f:ClearAllPoints()
@@ -68,6 +79,8 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		end
 	end
 end)
+
+sortTickFrame = CreateFrame("Frame", "MSLvlingSortTick")
 
 local function HasWord(m, w)
 	if not m:find(w, 1, true) then
@@ -242,7 +255,7 @@ local function RefreshInvited()
 			row:Show()
 			row.data = d
 			row.name:SetText(d.name)
-			row.roleText:SetText(d.role or "?")
+			row.roleText:SetText((d.role == "Tank" and "MT") or (d.role or "?"))
 			local c = ROLE_COLORS[d.role or "?"]
 			row.roleText:SetTextColor(c[1], c[2], c[3])
 			row.auraText:SetText(d.aura == nil and "?" or (d.aura and "Aura" or "No"))
@@ -285,7 +298,7 @@ end
 function RefreshSelf()
 	local pname = UnitName("player") or "?"
 	selfRow.name:SetText("You: " .. pname)
-	selfRoleText:SetText(db.me.role or "?")
+	selfRoleText:SetText((db.me.role == "Tank" and "MT") or (db.me.role or "?"))
 	local c = ROLE_COLORS[db.me.role or "?"]
 	selfRoleText:SetTextColor(c[1], c[2], c[3])
 	selfAuraText:SetText(db.me.aura == nil and "?" or (db.me.aura and "Aura" or "No"))
@@ -303,6 +316,12 @@ local function RefreshAll()
 	RefreshCounts()
 	RefreshCandidates()
 	RefreshInvited()
+	if finishBtn then
+		finishBtn:SetEnabled(collecting)
+	end
+	if title then
+		title:SetText("|cff66b3ffMS Leveling|r - Addon by Bokuden" .. (collecting and " |cff7dff7dCollecting...|r" or ""))
+	end
 end
 
 local function InvitePlayer(name)
@@ -333,13 +352,16 @@ function LoadRaid()
 	wipe(INVITED)
 	wipe(memberReplies)
 	collecting = true
-	collectUntil = GetTime() + 20
 	SendChatMessage("MSLeveling: reply with '1' Tank, '2' Heal, '3' Aura (e.g. '1 3'). No reply = DPS without aura.", "RAID_WARNING")
 	RefreshAll()
-	print(PREFIX .. "Raid started: reply in raid chat with 1 (Tank), 2 (Heal), 3 (Aura), e.g. '1 3'. Collecting for 20s.")
+	RefreshMTButtons()
+	print(PREFIX .. "Raid started: reply in raid chat with 1 (Tank), 2 (Heal), 3 (Aura), e.g. '1 3'. Press 'Finish Count' when everyone has replied.")
 end
 
 local function FinalizeCollect()
+	if not collecting then
+		return
+	end
 	collecting = false
 	wipe(INVITED)
 	local pname = UnitName("player")
@@ -361,6 +383,11 @@ local function FinalizeCollect()
 				end
 			end
 		end
+	end
+	if count == 0 then
+		print(PREFIX .. "No raid members to collect.")
+		RefreshAll()
+		return
 	end
 	wipe(memberReplies)
 	local t, h, d, a = GetCounts()
@@ -387,47 +414,13 @@ local function FinalizeCollect()
 			table.insert(auras, inv.name)
 		end
 	end
-	SendChatMessage("MSLeveling: Tanks: " .. (#tanks > 0 and table.concat(tanks, ", ") or "none"), "RAID")
-	SendChatMessage("MSLeveling: Heals: " .. (#heals > 0 and table.concat(heals, ", ") or "none"), "RAID")
-	SendChatMessage("MSLeveling: Auras: " .. (#auras > 0 and table.concat(auras, ", ") or "none"), "RAID")
+	SendChatMessage("MSLeveling: {circle}Tanks: " .. (#tanks > 0 and table.concat(tanks, ", ") or "none"), "RAID")
+	SendChatMessage("MSLeveling: {square}Heals: " .. (#heals > 0 and table.concat(heals, ", ") or "none"), "RAID")
+	SendChatMessage("MSLeveling: {triangle}Auras: " .. (#auras > 0 and table.concat(auras, ", ") or "none"), "RAID")
 	print(PREFIX .. string.format("Raid collected: %d players (DPS without aura by default).", count))
 	RefreshAll()
+	RefreshMTButtons()
 end
-
-local timerFrame = CreateFrame("Frame")
-timerFrame:Show()
-timerFrame:SetScript("OnUpdate", function()
-	if not collecting then
-		return
-	end
-	if GetTime() >= collectUntil then
-		FinalizeCollect()
-		return
-	end
-	if not timerFrame._nextCheck or GetTime() >= timerFrame._nextCheck then
-		timerFrame._nextCheck = GetTime() + 0.5
-		local pname = UnitName("player")
-		local any, allReplied = false, true
-		if IsInRaid() then
-			for i = 1, GetNumRaidMembers() do
-				local name = GetRaidRosterInfo(i)
-				if name then
-					name = name:gsub("%-.*", "")
-					if name ~= pname then
-						any = true
-						if not memberReplies[name] then
-							allReplied = false
-							break
-						end
-					end
-				end
-			end
-		end
-		if any and allReplied then
-			FinalizeCollect()
-		end
-	end
-end)
 
 local function ResetAll()
 	wipe(CANDIDATES)
@@ -438,9 +431,9 @@ end
 
 local function BroadcastLFM()
 	local t, h, d, a = GetCounts()
-	local msg = string.format("LFM 15-man: {circle}Tank %d/2 {square}Heal %d/3 {skull}DPS %d/10 {triangle}Aura %d/3 - reply role + aura/no", t, h, d, a)
+	local msg = string.format("LFM MS Leveling: {circle}Tank %d/2 {square}Heal %d/3 {skull}DPS %d/10 {triangle}Aura %d/3 - reply role + aura/no", t, h, d, a)
 	local preview = string.format(
-		"|cffffd000[MS Leveling]|r |cff66b3ffLFM|r 15-man: {circle}|cff66b3ffTank|r |cff%s%d/2|r {square}|cff66b3ffHeal|r |cff%s%d/3|r {skull}|cff66b3ffDPS|r |cff%s%d/10|r {triangle}|cff66b3ffAura|r |cff%s%d/3|r |cff66b3ffreply role + aura/no|r",
+		"|cffffd000[MS Leveling]|r |cff66b3ffLFM|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/2|r {square}|cff66b3ffHeal|r |cff%s%d/3|r {skull}|cff66b3ffDPS|r |cff%s%d/10|r {triangle}|cff66b3ffAura|r |cff%s%d/3|r |cff66b3ffreply role + aura/no|r",
 		CountColor(t, 2), t,
 		CountColor(h, 3), h,
 		CountColor(d, 10), d,
@@ -514,6 +507,418 @@ function RefreshStatus()
 	if changed then
 		RefreshAll()
 	end
+end
+
+function CleanLeavers()
+	if not IsInRaid() then
+		print(PREFIX .. "You are not in a raid.")
+		return
+	end
+	local names = {}
+	local pname = UnitName("player")
+	if pname then
+		names[pname:gsub("%-.*", "")] = true
+	end
+	for i = 1, GetNumPartyMembers() do
+		local n = UnitName("party" .. i)
+		if n then
+			names[n:gsub("%-.*", "")] = true
+		end
+	end
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n then
+			names[n:gsub("%-.*", "")] = true
+		end
+	end
+	local removed = 0
+	for i = #INVITED, 1, -1 do
+		local inv = INVITED[i]
+		if not names[inv.name] then
+			print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
+			table.remove(INVITED, i)
+			removed = removed + 1
+		end
+	end
+	if removed == 0 then
+		print(PREFIX .. "No changes: everyone on the invited list is still in the raid.")
+	end
+	RefreshAll()
+	RefreshMTButtons()
+end
+
+function SortGroups()
+	if not IsInRaid() then
+		print(PREFIX .. "You must be in a raid to sort groups.")
+		return
+	end
+	if not IsRaidLeader() and not IsRaidOfficer() then
+		print(PREFIX .. "You must be the raid leader or an assistant to sort groups.")
+		return
+	end
+	if InCombatLockdown() or (UnitAffectingCombat and UnitAffectingCombat("player")) then
+		if not pendingSort then
+			pendingSort = true
+			print(PREFIX .. "You are in combat. The group layout will be sorted automatically when combat ends.")
+		end
+		return
+	end
+	if sortRunning then
+		print(PREFIX .. "Sort already in progress.")
+		return
+	end
+	pendingSort = false
+	sortRunning = true
+	local roster = {}
+	local currentGroup = {}
+	local fullName = {}
+	local pname = (UnitName("player") or ""):gsub("%-.*", "")
+	local numMembers = GetNumRaidMembers()
+	for i = 1, numMembers do
+		local n, _, subgroup = GetRaidRosterInfo(i)
+		if n then
+			fullName[n] = n
+			n = n:gsub("%-.*", "")
+			roster[#roster + 1] = n
+			currentGroup[n] = subgroup or 1
+		end
+	end
+	local info = {}
+	info[pname] = { role = db.me.role, aura = db.me.aura }
+	for _, inv in ipairs(INVITED) do
+		info[inv.name] = info[inv.name] or {}
+		info[inv.name].role = inv.role
+		info[inv.name].aura = inv.aura
+	end
+	local groups = math.max(1, math.ceil(numMembers / 5))
+	local groupOf = {}
+	local countOf = {}
+	for g = 1, groups do
+		countOf[g] = 0
+	end
+	local function addToGroup(name, g)
+		if not groupOf[name] and countOf[g] < 5 then
+			groupOf[name] = g
+			countOf[g] = countOf[g] + 1
+		end
+	end
+	for _, n in ipairs(roster) do
+		if info[n] and info[n].role == "Tank" then
+			addToGroup(n, 1)
+		end
+	end
+	local function hasIn(g, pred)
+		for _, n in ipairs(roster) do
+			if groupOf[n] == g and pred(info[n]) then
+				return true
+			end
+		end
+		return false
+	end
+	local function healIn(g)
+		return hasIn(g, function(inf)
+			return inf and inf.role == "Heal"
+		end)
+	end
+	local function auraIn(g)
+		return hasIn(g, function(inf)
+			return inf and inf.aura
+		end)
+	end
+	for _, n in ipairs(roster) do
+		if not groupOf[n] and info[n] and info[n].role == "Heal" then
+			local placed = false
+			for g = 1, groups do
+				if not placed and not healIn(g) and countOf[g] < 5 then
+					addToGroup(n, g)
+					placed = true
+				end
+			end
+			if not placed then
+				for g = 1, groups do
+					if not placed and countOf[g] < 5 then
+						addToGroup(n, g)
+						placed = true
+					end
+				end
+			end
+		end
+	end
+	for _, n in ipairs(roster) do
+		if not groupOf[n] and info[n] and info[n].aura then
+			local placed = false
+			for g = 1, groups do
+				if not placed and not auraIn(g) and countOf[g] < 5 then
+					addToGroup(n, g)
+					placed = true
+				end
+			end
+			if not placed then
+				for g = 1, groups do
+					if not placed and countOf[g] < 5 then
+						addToGroup(n, g)
+						placed = true
+					end
+				end
+			end
+		end
+	end
+	for _, n in ipairs(roster) do
+		if not groupOf[n] then
+			for g = 1, groups do
+				addToGroup(n, g)
+				if groupOf[n] then
+					break
+				end
+			end
+		end
+	end
+	local function liveGroup(name)
+		for i = 1, GetNumRaidMembers() do
+			local n, _, sg = GetRaidRosterInfo(i)
+			if n and n:gsub("%-.*", "") == name then
+				return sg or 1
+			end
+		end
+		return 1
+	end
+	local function countIn(g)
+		local c = 0
+		for _, n in ipairs(roster) do
+			if liveGroup(n) == g then
+				c = c + 1
+			end
+		end
+		return c
+	end
+	local function findHolding()
+		for g = groups + 1, 8 do
+			if countIn(g) < 5 then
+				return g
+			end
+		end
+	end
+	local function getIndex(name)
+		for i = 1, GetNumRaidMembers() do
+			local n = GetRaidRosterInfo(i)
+			if n and n:gsub("%-.*", "") == name then
+				return i
+			end
+		end
+	end
+	local moved, failed = 0, 0
+	local blocked = nil
+	local function capture(err)
+		if not blocked and err then
+			blocked = tostring(err)
+		end
+	end
+	local function moveTo(name, g)
+		local idx = getIndex(name)
+		if not idx then
+			return false
+		end
+		local ok, err = pcall(SetRaidSubgroup, idx, g)
+		if not ok then
+			capture(err)
+			return false
+		end
+		return liveGroup(name) == g
+	end
+	local function trySwap(n, t)
+		local i1 = getIndex(n)
+		if not i1 then
+			return false
+		end
+		for _, m in ipairs(roster) do
+			if groupOf[m] ~= t and liveGroup(m) == t then
+				local i2 = getIndex(m)
+				if i2 then
+					local ok, err = pcall(SwapRaidSubgroup, i1, i2)
+					if not ok then
+						capture(err)
+					end
+					return liveGroup(n) == t
+				end
+			end
+		end
+		return false
+	end
+	local function findHolding()
+		for g = groups + 1, 8 do
+			if countIn(g) < 5 then
+				return g
+			end
+		end
+	end
+	local function tryPlace(n)
+		local t = groupOf[n]
+		if not t then
+			return true
+		end
+		if liveGroup(n) == t then
+			return true
+		end
+		if not getIndex(n) then
+			return true
+		end
+		if countIn(t) < 5 then
+			moveTo(n, t)
+			return liveGroup(n) == t
+		end
+		if trySwap(n, t) then
+			return true
+		end
+		local h = findHolding()
+		if h then
+			for _, m in ipairs(roster) do
+				if groupOf[m] ~= t and liveGroup(m) == t then
+					moveTo(m, h)
+					break
+				end
+			end
+			if countIn(t) < 5 then
+				moveTo(n, t)
+			end
+		end
+		return liveGroup(n) == t
+	end
+	local pending = {}
+	for _, n in ipairs(roster) do
+		if groupOf[n] and liveGroup(n) ~= groupOf[n] then
+			pending[#pending + 1] = n
+		end
+	end
+	local ticks = 0
+	local cursor = 0
+	local finished = false
+	local function finish()
+		if finished then
+			return
+		end
+		finished = true
+		sortRunning = false
+		sortTickFrame:SetScript("OnUpdate", nil)
+		local moved, failed = 0, 0
+		local failedNames = {}
+		for _, n in ipairs(roster) do
+			if groupOf[n] then
+				if liveGroup(n) == groupOf[n] then
+					if currentGroup[n] ~= groupOf[n] then
+						moved = moved + 1
+					end
+				else
+					failed = failed + 1
+					failedNames[#failedNames + 1] = n
+				end
+			end
+		end
+		local MT_ICONS = { 1, 5, 2, 3, 4, 6, 7, 8 }
+		local mtCommands = {}
+		local tankIndex = 0
+		for _, n in ipairs(roster) do
+			local idx = getIndex(n)
+			if info[n] and info[n].role == "Tank" then
+				tankIndex = tankIndex + 1
+				if idx and SetRaidTargetIcon then
+					pcall(SetRaidTargetIcon, "raid" .. idx, MT_ICONS[tankIndex] or MT_ICONS[1])
+				end
+				mtCommands[#mtCommands + 1] = "/maintank " .. n
+			end
+		end
+		local auraParts, healParts = {}, {}
+		local tankList = {}
+		for g = 1, groups do
+			local auraNames, healNames = {}, {}
+			for _, n in ipairs(roster) do
+				if groupOf[n] == g then
+					if info[n] and info[n].role == "Tank" then
+						table.insert(tankList, n)
+					end
+					if info[n] and info[n].role == "Heal" then
+						table.insert(healNames, n)
+					end
+					if info[n] and info[n].aura then
+						table.insert(auraNames, n)
+					end
+				end
+			end
+			if #auraNames > 0 then
+				auraParts[#auraParts + 1] = string.format("G%d Aura: %s", g, table.concat(auraNames, ", "))
+			end
+			if #healNames > 0 then
+				healParts[#healParts + 1] = string.format("G%d Heal: %s", g, table.concat(healNames, ", "))
+			end
+		end
+		local function joinList(list)
+			if #list == 0 then
+				return "none"
+			elseif #list == 1 then
+				return list[1]
+			end
+			return table.concat(list, ", ", 1, #list - 1) .. " and " .. list[#list]
+		end
+		if #auraParts > 0 then
+			SendChatMessage("MSLeveling: " .. table.concat(auraParts, ", "), "RAID")
+		end
+		if #healParts > 0 then
+			SendChatMessage("MSLeveling: " .. table.concat(healParts, "; "), "RAID")
+		end
+		SendChatMessage("MSLeveling: Tanks: " .. joinList(tankList), "RAID")
+		print(PREFIX .. string.format("Groups sorted: %d moved, %d failed.", moved, failed))
+		if #failedNames > 0 then
+			print(PREFIX .. "Could not place: " .. table.concat(failedNames, ", "))
+		end
+		if blocked then
+			print(PREFIX .. "Client blocked an action: " .. blocked)
+			print(PREFIX .. "Try sorting while not in combat and as raid leader.")
+		end
+		if #mtCommands > 0 then
+			print(PREFIX .. "Click a Mark MT button to set the Main Tank in the raid frame.")
+		end
+		RefreshAll()
+		RefreshMTButtons()
+	end
+	local function tick()
+		ticks = ticks + 1
+		if ticks > 60 then
+			finish()
+			return
+		end
+		local attempts = 0
+		local still = {}
+		for i = 1, #pending do
+			local n = pending[((cursor + i - 1) % #pending) + 1]
+			if liveGroup(n) == groupOf[n] then
+			elseif attempts < 2 then
+				attempts = attempts + 1
+				if not tryPlace(n) then
+					still[#still + 1] = n
+				end
+			else
+				still[#still + 1] = n
+			end
+		end
+		cursor = (cursor + attempts) % math.max(1, #pending)
+		pending = still
+		if #pending == 0 then
+			finish()
+		end
+	end
+	if #pending == 0 then
+		finish()
+	else
+		sortElapsed = 0
+		sortTickFrame:SetScript("OnUpdate", function(self, dt)
+			sortElapsed = sortElapsed + dt
+			if sortElapsed >= 0.15 then
+				sortElapsed = 0
+				tick()
+			end
+		end)
+	end
+	RefreshAll()
+	RefreshMTButtons()
 end
 
 local function UpsertCandidate(name, role, aura)
@@ -715,7 +1120,7 @@ local function CreateRow(parent, isCandidate)
 end
 
 f = CreateFrame("Frame", "MSLevelingFrame", UIParent)
-f:SetSize(430, 590)
+f:SetSize(430, 640)
 f:SetPoint("CENTER")
 f:SetBackdrop({
 	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -744,7 +1149,7 @@ f:SetScript("OnShow", function()
 	RefreshAll()
 end)
 
-local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 title:SetPoint("TOPLEFT", 16, -10)
 title:SetText("|cff66b3ffMS Leveling|r - Addon by Bokuden")
 
@@ -817,9 +1222,15 @@ resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSLEVELING_RESET")
 end)
 
+finishBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+finishBtn:SetSize(100, 22)
+finishBtn:SetPoint("TOPLEFT", 16, -108)
+finishBtn:SetText("Finish Count")
+finishBtn:SetScript("OnClick", FinalizeCollect)
+
 local autoBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 autoBtn:SetSize(104, 22)
-autoBtn:SetPoint("LEFT", resetBtn, "RIGHT", 6, 0)
+autoBtn:SetPoint("LEFT", finishBtn, "RIGHT", 6, 0)
 autoBtn:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
 autoBtn:SetScript("OnClick", function(self)
 	db.autoReply = not db.autoReply
@@ -827,15 +1238,80 @@ autoBtn:SetScript("OnClick", function(self)
 	print(PREFIX .. "Automatic whisper reply: " .. (db.autoReply and "enabled" or "disabled"))
 end)
 
+local sortBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+sortBtn:SetSize(110, 22)
+sortBtn:SetPoint("LEFT", autoBtn, "RIGHT", 6, 0)
+sortBtn:SetText("Sort Groups")
+sortBtn:SetScript("OnClick", SortGroups)
+
+local cleanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+cleanBtn:SetSize(66, 22)
+cleanBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+cleanBtn:SetText("Clean")
+cleanBtn:SetScript("OnClick", CleanLeavers)
+
+local mtLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+mtLabel:SetPoint("TOPLEFT", 16, -176)
+mtLabel:SetText("Mark MT (click = /maintank)")
+
+local mtButtons = {}
+function RefreshMTButtons()
+	for _, b in ipairs(mtButtons) do
+		b:Hide()
+	end
+	local tanks = {}
+	local seen = {}
+	local pname = UnitName("player")
+	local function addTank(n)
+		if n and not seen[n] then
+			seen[n] = true
+			tanks[#tanks + 1] = n
+		end
+	end
+	if db.me.role == "Tank" then
+		addTank(pname)
+	end
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n then
+			n = n:gsub("%-.*", "")
+			local role
+			for _, c in ipairs(INVITED) do
+				if c.name == n then
+					role = c.role
+					break
+				end
+			end
+			if role == "Tank" then
+				addTank(n)
+			end
+		end
+	end
+	for i, name in ipairs(tanks) do
+		local b = mtButtons[i]
+		if not b then
+			b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
+			b:SetSize(112, 22)
+			b:SetPoint("TOPLEFT", 200 + (i - 1) * 118, -176)
+			b:SetAttribute("type", "macro")
+			mtButtons[i] = b
+		end
+		b:SetText("MT: " .. name)
+		b:SetAttribute("macrotext", "/maintank " .. name)
+		b:Show()
+	end
+end
+RefreshMTButtons()
+
 local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-chLabel:SetPoint("TOPLEFT", 16, -114)
+chLabel:SetPoint("TOPLEFT", 16, -134)
 chLabel:SetText("LFM channels (click to change, 0 = none):")
 
 local chButtons = {}
 for i = 1, 3 do
 	local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 	b:SetSize(36, 20)
-	b:SetPoint("TOPLEFT", 16 + (i - 1) * 42, -130)
+	b:SetPoint("TOPLEFT", 16 + (i - 1) * 42, -150)
 	b:SetText(tostring(db.channels[i] or 0))
 	b:SetScript("OnClick", function(self)
 		db.channels[i] = ((db.channels[i] or 0) + 1) % 11
@@ -845,14 +1321,14 @@ for i = 1, 3 do
 end
 
 local candHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-candHeader:SetPoint("TOPLEFT", 16, -146)
+candHeader:SetPoint("TOPLEFT", 16, -204)
 candHeader:SetText("Candidates (whispers):")
 
 candScroll = CreateFrame("ScrollFrame", "MSLevelingCandScroll", f, "FauxScrollFrameTemplate")
-candScroll:SetPoint("TOPLEFT", 8, -162)
-candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -162)
-candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -338)
-candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -338)
+candScroll:SetPoint("TOPLEFT", 8, -220)
+candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -220)
+candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -396)
+candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -396)
 candScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshCandidates)
 end)
@@ -865,18 +1341,18 @@ end)
 candRows = {}
 for i = 1, ROWS_CAND do
 	candRows[i] = CreateRow(f, true)
-	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -162 - (i - 1) * ROW_HEIGHT)
+	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -220 - (i - 1) * ROW_HEIGHT)
 end
 
 local invHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-invHeader:SetPoint("TOPLEFT", 16, -346)
+invHeader:SetPoint("TOPLEFT", 16, -404)
 invHeader:SetText("Invited:")
 
 invScroll = CreateFrame("ScrollFrame", "MSLevelingInvScroll", f, "FauxScrollFrameTemplate")
-invScroll:SetPoint("TOPLEFT", 8, -362)
-invScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -362)
-invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -572)
-invScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -572)
+invScroll:SetPoint("TOPLEFT", 8, -420)
+invScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -420)
+invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -630)
+invScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -630)
 invScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshInvited)
 end)
@@ -889,7 +1365,7 @@ end)
 invRows = {}
 for i = 1, ROWS_INV do
 	invRows[i] = CreateRow(f, false)
-	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -362 - (i - 1) * ROW_HEIGHT)
+	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -420 - (i - 1) * ROW_HEIGHT)
 end
 
 local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
