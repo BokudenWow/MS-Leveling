@@ -1,0 +1,8 @@
+## Interface: 30300
+## Title: MS Leveling 2
+## Notes: Gestor de grupos de 15 (MS Leveling 2 - sistema de raids con ready check, MS1, disband+re-invite y anti-leech).
+## Author: tu-nombre
+## Version: 2.0.0
+## SavedVariables: MSLeveling2DB
+
+MSLeveling.lua
