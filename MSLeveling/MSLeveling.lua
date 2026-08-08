@@ -540,7 +540,19 @@ function CleanLeavers()
 			removed = removed + 1
 		end
 	end
-	if removed == 0 then
+	local added = 0
+	local registered = {}
+	for _, inv in ipairs(INVITED) do
+		registered[inv.name] = true
+	end
+	for n in pairs(names) do
+		if n ~= pname and not registered[n] then
+			table.insert(INVITED, { name = n, role = "DPS", aura = false, status = "Joined" })
+			print(PREFIX .. n .. " was in the raid but not registered, added as DPS.")
+			added = added + 1
+		end
+	end
+	if removed == 0 and added == 0 then
 		print(PREFIX .. "No changes: everyone on the invited list is still in the raid.")
 	end
 	RefreshAll()
