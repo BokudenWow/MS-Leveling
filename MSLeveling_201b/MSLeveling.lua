@@ -64,7 +64,7 @@ local THEME = {
 local chips
 
 local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows, finishBtn, title
-local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons
+local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll
 
 local collecting = db.collecting
 local memberReplies = db.memberReplies
@@ -258,6 +258,10 @@ end
 local AURA_NEG_PHRASES = {
 	" no aura ",
 	" no auras ",
+	" noaura ",
+	" noauras ",
+	" sinaura ",
+	" sinauras ",
 	" sin aura",
 	" sin auras",
 	" without aura ",
@@ -276,6 +280,8 @@ local AURA_NEG_PHRASES = {
 	" aura no",
 	" auras no",
 	" no buff",
+	" nobuff ",
+	" sinbuff ",
 	" sin buff",
 	" no aura buff",
 	" would not",
@@ -542,7 +548,7 @@ function RefreshSelf()
 	end
 end
 
-local function RefreshAll()
+RefreshAll = function()
 	RefreshSelf()
 	RefreshCounts()
 	RefreshCandidates()
@@ -758,7 +764,7 @@ local function BroadcastLFM()
 	local channelNames = {}
 	local joined = {}
 	for i = 1, 50 do
-		local name, num = GetChannelList(i)
+		local num, name = GetChannelName(i)
 		if not name then
 			break
 		end
@@ -847,9 +853,11 @@ function RefreshStatus()
 	end
 end
 
-function CleanLeavers()
+function CleanLeavers(silent)
 	if not IsInRaid() then
-		print(PREFIX .. "You are not in a raid.")
+		if not silent then
+			print(PREFIX .. "You are not in a raid.")
+		end
 		return
 	end
 	local names = {}
@@ -891,7 +899,9 @@ function CleanLeavers()
 		end
 	end
 	if removed == 0 and added == 0 then
-		print(PREFIX .. "No changes: everyone on the invited list is still in the raid.")
+		if not silent then
+			print(PREFIX .. "No changes: everyone on the invited list is still in the raid.")
+		end
 	end
 	RefreshAll()
 	RefreshMTButtons()
@@ -1403,11 +1413,12 @@ local function ChannelNumberFromName(channelName)
 	local base = tostring(channelName or ""):gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
 	if base ~= "" then
 		for i = 1, 50 do
-			local name, num = GetChannelList(i)
+			local num, name = GetChannelName(i)
 			if not name then
 				break
 			end
-			if name:lower() == base then
+			local cleanName = name:gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
+			if cleanName == base then
 				return num
 			end
 		end
@@ -1415,7 +1426,7 @@ local function ChannelNumberFromName(channelName)
 	return 0
 end
 
-function HandleChannel(msg, author, language, channelName)
+function HandleChannel(msg, author, language, channelName, target, flags, unknown, channelNumber)
 	if not db.autoLFG then
 		return
 	end
@@ -1427,8 +1438,8 @@ function HandleChannel(msg, author, language, channelName)
 	if pname and name == pname:gsub("%-.*", "") then
 		return
 	end
-	local chNum = ChannelNumberFromName(channelName)
-	if chNum == 0 then
+	local chNum = tonumber(channelNumber) or ChannelNumberFromName(channelName)
+	if not chNum or chNum == 0 then
 		return
 	end
 	local selected = false
@@ -1518,7 +1529,7 @@ function HandleRaidChat(msg, author)
 	end
 end
 
-local function RemoveInvited(name)
+RemoveInvited = function(name)
 	for i, inv in ipairs(db.invited) do
 		if inv.name == name then
 			table.remove(db.invited, i)
@@ -1608,17 +1619,13 @@ function CheckRaidLevels()
 					has60 = true
 					if not flaggedPlayers[n] or flaggedPlayers[n].reason ~= FLAG_LVL60 then
 						FlagPlayer(n, FLAG_LVL60)
-						SendChatMessage("[MSL] " .. n .. " reached LEVEL 60 - kicking player.", "RAID_WARNING")
-						
-                        -- NUEVA LÓGICA: Expulsa únicamente a este jugador de forma automática
-						KickPlayer(n, "Reached level 60")
-						UnflagPlayer(n) -- Limpia al jugador de la lista de advertencias tras expulsarlo
+						SendChatMessage("[MSL] " .. n .. " reached LEVEL 60.", "RAID_WARNING")
 					end
 				else
 					has59 = true
 					if not flaggedPlayers[n] or flaggedPlayers[n].reason ~= FLAG_LVL59 then
 						FlagPlayer(n, FLAG_LVL59)
-						SendChatMessage("[MSL] " .. n .. " reached LEVEL 59 - will be kicked at 60!", "RAID_WARNING")
+						SendChatMessage("[MSL] " .. n .. " reached LEVEL 59.", "RAID_WARNING")
 					end
 				end
 			else
@@ -1644,7 +1651,7 @@ end
 
 local pendingFrameShow = nil
 
-local function ApplyFrameToggle()
+ApplyFrameToggle = function()
 	if pendingFrameShow == nil then
 		return
 	end
@@ -1703,10 +1710,12 @@ function CheckDepartures()
 	if pname then
 		current[pname:gsub("%-.*", "")] = true
 	end
+	local removed = false
 	for i = #db.invited, 1, -1 do
 		local inv = db.invited[i]
 		if not current[inv.name] and lastRosterNames[inv.name] then
 			table.remove(db.invited, i)
+			removed = true
 			print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
 			if not farewellScheduled[inv.name] then
 				farewellScheduled[inv.name] = true
@@ -1717,6 +1726,9 @@ function CheckDepartures()
 			end
 			RefreshAll()
 		end
+	end
+	if removed then
+		CleanLeavers(true)
 	end
 	local _, name
 	for name in pairs(current) do
@@ -2466,7 +2478,7 @@ UpdateAutoButtons()
 
 CheckAutoOff = function()
 	local _, _, _, _, tot = GetCounts()
-	if tot >= MAX_TOTAL and (db.autoLFM or db.autoLFG or db.autoReply) then
+	if tot >= MAX_TOTAL and (db.autoLFM or db.autoLFG) then
 		if db.autoLFM then
 			db.autoLFM = false
 			print(PREFIX .. "Raid full (15/15), Auto-LFM disabled.")
@@ -2474,10 +2486,6 @@ CheckAutoOff = function()
 		if db.autoLFG then
 			db.autoLFG = false
 			print(PREFIX .. "Raid full (15/15), Auto-LFG disabled.")
-		end
-		if db.autoReply then
-			db.autoReply = false
-			print(PREFIX .. "Raid full (15/15), Auto-Reply disabled.")
 		end
 		UpdateAutoButtons()
 	end
@@ -2513,7 +2521,9 @@ local cleanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
 cleanBtn:SetSize(100, 22)
 cleanBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
 cleanBtn:SetText("Update raid")
-cleanBtn:SetScript("OnClick", CleanLeavers)
+cleanBtn:SetScript("OnClick", function()
+	CleanLeavers()
+end)
 
 local featureButtons = {}
 local featureDefs = { { "Ready Check", "Ready" }, { "Enter MS 1", "EnterMS" }, { "Disband+Re-inv", "Disband" }, { "Anti-leech", "Anti" } }
@@ -2524,12 +2534,33 @@ for i, def in ipairs(featureDefs) do
 		b:SetAttribute("type", "click")
 		b:SetAttribute("clickbutton", nil)
 		b:SetScript("PreClick", function(self)
+			self:SetAttribute("clickbutton", nil)
 			local native = _G.ManastormQueueFrameRightPanelEnterButton
-			if native and native:GetObjectType() == "Button" then
-				self:SetAttribute("clickbutton", native)
-			else
-				self:SetAttribute("clickbutton", nil)
+			if not native or native:GetObjectType() ~= "Button" then
+				return
 			end
+			if not IsInRaid() then
+				print(PREFIX .. "You must be in a raid to enter Group Manastorm.")
+				return
+			end
+			local queueFrame = _G.ManastormQueueFrame
+			if queueFrame and type(queueFrame.IsShown) == "function" and not queueFrame:IsShown() then
+				print(PREFIX .. "Open Ascension's Mana Storm panel and select Level 1, then click Enter MS 1 again.")
+				return
+			end
+			local dropdown = _G.ManastormQueueFrameRightPanelLevelDropDown
+			if dropdown then
+				local txt = type(dropdown.GetText) == "function" and dropdown:GetText() or ""
+				if tonumber(tostring(txt):match("[Ll]evel%s*(%d+)")) ~= 1 then
+					print(PREFIX .. "Select Level 1 on Ascension's Mana Storm panel first.")
+					return
+				end
+			end
+			if type(native.IsEnabled) == "function" and not native:IsEnabled() then
+				print(PREFIX .. "Ascension's Enter Group Manastorm button is currently disabled.")
+				return
+			end
+			self:SetAttribute("clickbutton", native)
 		end)
 		b:SetScript("PostClick", function(self)
 			self:SetAttribute("clickbutton", nil)
