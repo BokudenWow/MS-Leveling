@@ -189,6 +189,9 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		if CheckRaidLevels then
 			CheckRaidLevels()
 		end
+		if ApplyRaidIcons then
+			ApplyRaidIcons()
+		end
 	elseif event == "UNIT_LEVEL" or event == "PLAYER_LEVEL_UP" then
 		if RefreshStatus then
 			RefreshStatus()
@@ -400,6 +403,7 @@ end
 
 local function GetCounts()
 	local t, h, d, a = 0, 0, 0, 0
+	local tot = 0
 	if db.me.role == "Tank" then
 		t = t + 1
 	elseif db.me.role == "Heal" then
@@ -407,22 +411,25 @@ local function GetCounts()
 	elseif db.me.role == "DPS" then
 		d = d + 1
 	end
+	tot = 1
 	if db.me.aura then
 		a = a + 1
 	end
 	for _, inv in ipairs(db.invited) do
-		if (inv.status == "Joined" or inv.status == "Pending") and inv.role == "Tank" then
-			t = t + 1
-		elseif (inv.status == "Joined" or inv.status == "Pending") and inv.role == "Heal" then
-			h = h + 1
-		elseif (inv.status == "Joined" or inv.status == "Pending") and inv.role == "DPS" then
-			d = d + 1
-		end
-		if (inv.status == "Joined" or inv.status == "Pending") and inv.aura then
-			a = a + 1
+		if inv.status == "Joined" or inv.status == "Pending" then
+			tot = tot + 1
+			if inv.role == "Tank" then
+				t = t + 1
+			elseif inv.role == "Heal" then
+				h = h + 1
+			elseif inv.role == "DPS" then
+				d = d + 1
+			end
+			if inv.aura then
+				a = a + 1
+			end
 		end
 	end
-	local tot = t + h + d
 	return t, h, d, a, tot
 end
 
@@ -612,6 +619,15 @@ local function InvitePlayer(name)
 	if not cand then
 		return
 	end
+	local _, _, _, _, tot = GetCounts()
+	if tot >= MAX_TOTAL then
+		print(PREFIX .. name .. " was not invited: the raid is already full (" .. MAX_TOTAL .. "/" .. MAX_TOTAL .. ").")
+		return
+	end
+	if GetNumRaidMembers() >= MAX_TOTAL then
+		print(PREFIX .. name .. " was not invited: the raid already has " .. GetNumRaidMembers() .. "/" .. MAX_TOTAL .. " players.")
+		return
+	end
 	local t, h, d, a = GetCounts()
 	if cand.role == "Tank" and t >= MAX_TANK then
 		print(PREFIX .. name .. " is a Tank but the tank slots are full.")
@@ -788,21 +804,60 @@ local function ResetAll()
 	RefreshAll()
 end
 
+local function BuildNeedsList(t, h, d, a, tot)
+	local missing = MAX_TOTAL - tot
+	if missing <= 0 or missing > 3 then
+		return nil
+	end
+	local needTank = math.max(0, MAX_TANK - t)
+	local needHeal = math.max(0, MAX_HEAL - h)
+	local needAura = math.max(0, MAX_AURA - a)
+	local needDPS = math.max(0, missing - needTank - needHeal - needAura)
+	local items = {}
+	if needAura > 0 then items[#items + 1] = { needAura, "AURA" } end
+	if needTank > 0 then items[#items + 1] = { needTank, "Tank" } end
+	if needHeal > 0 then items[#items + 1] = { needHeal, "Healer" } end
+	if needDPS > 0 then items[#items + 1] = { needDPS, "DPS" } end
+	local parts = {}
+	local remaining = missing
+	for _, item in ipairs(items) do
+		if remaining <= 0 then
+			break
+		end
+		local n = math.min(item[1], remaining)
+		remaining = remaining - n
+		parts[#parts + 1] = n .. " " .. item[2]
+	end
+	if #parts == 0 then
+		return nil
+	end
+	return table.concat(parts, " | ")
+end
+
 local function BroadcastLFM()
 	local t, h, d, a, tot = GetCounts()
-	local prefix = "LFM"
-	if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
-		prefix = "LF1M AURA AND GO"
+	local missing = MAX_TOTAL - tot
+	local needs = BuildNeedsList(t, h, d, a, tot)
+	local msg, preview
+	if needs then
+		local prefix = "LF" .. missing .. "M"
+		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, needs)
+		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, needs)
+	else
+		local prefix = "LFM"
+		if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
+			prefix = "LF1M AURA AND GO"
+		end
+		msg = string.format("%s MS Leveling: {circle}Tank %d/%d {square}Heal %d/%d {skull}DPS %d/%d {triangle}Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
+		preview = string.format(
+			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+			prefix,
+			CountColor(t, MAX_TANK), t, MAX_TANK,
+			CountColor(h, MAX_HEAL), h, MAX_HEAL,
+			CountColor(d, MAX_DPS), d, MAX_DPS,
+			CountColor(a, MAX_AURA), a, MAX_AURA
+		)
 	end
-	local msg = string.format("%s MS Leveling: {circle}Tank %d/%d {square}Heal %d/%d {skull}DPS %d/%d {triangle}Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
-	local preview = string.format(
-		"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
-		prefix,
-		CountColor(t, MAX_TANK), t, MAX_TANK,
-		CountColor(h, MAX_HEAL), h, MAX_HEAL,
-		CountColor(d, MAX_DPS), d, MAX_DPS,
-		CountColor(a, MAX_AURA), a, MAX_AURA
-	)
 	local sent = 0
 	local failed = {}
 	local channelNames = {}
@@ -953,6 +1008,48 @@ end
 
 local lastRaidRoster = {}
 local rosterSeen = false
+
+local MT_ICONS = { 6, 2, 3, 4, 1, 5, 7, 8 }
+
+local function BuildRoleInfo()
+	local info = {}
+	local pname = UnitName("player")
+	if pname then
+		info[pname:gsub("%-.*", "")] = { role = db.me.role, aura = db.me.aura }
+	end
+	for _, inv in ipairs(db.invited) do
+		info[inv.name] = info[inv.name] or {}
+		info[inv.name].role = inv.role
+		info[inv.name].aura = inv.aura
+	end
+	return info
+end
+
+-- Places the tank icon on every Tank currently in the raid, using the live
+-- roster (not a snapshot). Safe to re-run whenever the roster changes so a
+-- Tank that joins right after the auto-sort still gets its icon.
+function ApplyRaidIcons()
+	if not IsInRaid() then
+		return
+	end
+	if not (IsRaidLeader() or IsRaidOfficer()) then
+		return
+	end
+	local info = BuildRoleInfo()
+	local tankIndex = 0
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n then
+			local name = n:gsub("%-.*", "")
+			if info[name] and info[name].role == "Tank" then
+				tankIndex = tankIndex + 1
+				if SetRaidTargetIcon then
+					pcall(SetRaidTargetIcon, "raid" .. i, MT_ICONS[tankIndex] or MT_ICONS[1])
+				end
+			end
+		end
+	end
+end
 
 function SyncRaidRoster()
 	local now = {}
@@ -1254,16 +1351,10 @@ function SortGroups()
 				end
 			end
 		end
-		local MT_ICONS = { 6, 2, 3, 4, 1, 5, 7, 8 }
+		ApplyRaidIcons()
 		local mtCommands = {}
-		local tankIndex = 0
 		for _, n in ipairs(roster) do
-			local idx = getIndex(n)
 			if info[n] and info[n].role == "Tank" then
-				tankIndex = tankIndex + 1
-				if idx and SetRaidTargetIcon then
-					pcall(SetRaidTargetIcon, "raid" .. idx, MT_ICONS[tankIndex] or MT_ICONS[1])
-				end
 				mtCommands[#mtCommands + 1] = "/maintank " .. n
 			end
 		end
@@ -1465,8 +1556,9 @@ function HandleWhisper(msg, author)
 	if role then
 		hasSlot, rejectReason = HasSlot(role, aura)
 	end
+	local invitedNow = false
 	if (role or aura) and hasSlot then
-		TryAutoInvite(name)
+		invitedNow = TryAutoInvite(name) or false
 	end
 	if db.autoReply then
 		if not hasSlot and rejectReason then
@@ -1475,9 +1567,9 @@ function HandleWhisper(msg, author)
 				rejectSent[name] = now
 				pcall(SendChatMessage, rejectReason, "WHISPER", nil, name)
 			end
-		elseif role or aura ~= nil then
+		elseif not invitedNow and (role or aura ~= nil) then
 			SendChatMessage(REPLY_OK, "WHISPER", nil, name)
-		else
+		elseif not invitedNow then
 			SendChatMessage(REPLY_HELP, "WHISPER", nil, name)
 		end
 	end
@@ -2581,7 +2673,7 @@ RefreshCompLabels()
 RefreshCounts()
 
 selfRow = CreateFrame("Frame", nil, f)
-selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -252)
+selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -296)
 selfRow:SetSize(620, ROW_HEIGHT)
 
 selfRow.name = selfRow:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -2611,8 +2703,20 @@ selfAura:SetScript("OnClick", function()
 	RefreshAll()
 end)
 
+local function CreateSectionTitle(y, text)
+	local t = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	t:SetPoint("TOPLEFT", 12, y)
+	t:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
+	t:SetText(text)
+	return t
+end
+
+CreateSectionTitle(-158, "Form Raid")
+CreateSectionTitle(-204, "Manage raid")
+CreateSectionTitle(-250, "GO")
+
 local lfmBtn = CreateMSLButton(f, "Post LFM", 96, 22)
-lfmBtn:SetPoint("TOPLEFT", 12, -164)
+lfmBtn:SetPoint("TOPLEFT", 12, -176)
 lfmBtn:SetScript("OnClick", BroadcastLFM)
 
 local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoLFM: On" or "AutoLFM: Off", 100, 22)
@@ -2640,7 +2744,7 @@ autoBtn:SetScript("OnClick", function(self)
 end)
 
 local raidBtn = CreateMSLButton(f, "Load Raid", 96, 22)
-raidBtn:SetPoint("TOPLEFT", 12, -192)
+raidBtn:SetPoint("TOPLEFT", 12, -222)
 raidBtn:SetScript("OnClick", LoadRaid)
 
 finishBtn = CreateMSLButton(f, "Finish Count", 110, 22)
@@ -2687,7 +2791,11 @@ CheckAutoOff = function()
 			autoSortDone = true
 			if (IsRaidLeader() or IsRaidOfficer()) then
 				print(PREFIX .. "Raid full, sorting groups automatically.")
-				SortGroups()
+				SendChatMessage("Raid full.", "RAID")
+				SendChatMessage("Sorting groups in 3 seconds..", "RAID")
+				After(3, function()
+					SortGroups()
+				end)
 			end
 		end
 		if db.autoLFM then
@@ -2711,27 +2819,193 @@ resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSL201B_RESET")
 end)
 
+local manastormQueueFrame
+local manastormEnterButton
+local manastormLevelDropDown
+
+local function ManastormFrameText(frame)
+	if not frame then
+		return ""
+	end
+	if type(frame.GetText) == "function" then
+		local txt = frame:GetText()
+		if txt then
+			return tostring(txt)
+		end
+	end
+	if type(frame.GetNumRegions) == "function" then
+		for i = 1, frame:GetNumRegions() do
+			local region = select(i, frame:GetRegions())
+			if region and type(region.GetText) == "function" then
+				local txt = region:GetText()
+				if txt then
+					return tostring(txt)
+				end
+			end
+		end
+	end
+	return ""
+end
+
+local function ManastormFindEnterInChildren(frame, depth, seen)
+	if not frame or seen[frame] or depth > 10 then
+		return nil
+	end
+	seen[frame] = true
+	if type(frame.GetObjectType) == "function" and frame:GetObjectType() == "Button"
+		and ManastormFrameText(frame):match("Enter") then
+		return frame
+	end
+	if type(frame.GetChildren) == "function" then
+		local child
+		for _, child in ipairs({ frame:GetChildren() }) do
+			local found = ManastormFindEnterInChildren(child, depth + 1, seen)
+			if found then
+				return found
+			end
+		end
+	end
+	return nil
+end
+
+local function ResolveManastormFrames()
+	local eb = _G.ManastormQueueFrameRightPanelEnterButton
+	if eb and eb:GetObjectType() == "Button" then
+		manastormQueueFrame = _G.ManastormQueueFrame
+		manastormEnterButton = eb
+		manastormLevelDropDown = _G.ManastormQueueFrameRightPanelLevelDropDown
+		return manastormQueueFrame, manastormEnterButton, manastormLevelDropDown, true
+	end
+	if manastormEnterButton and manastormEnterButton:GetObjectType() == "Button" then
+		return manastormQueueFrame, manastormEnterButton, manastormLevelDropDown, true
+	end
+	manastormQueueFrame, manastormEnterButton, manastormLevelDropDown = nil, nil, nil
+	local foundAny = false
+	for k, v in pairs(_G) do
+		if type(v) == "table" and type(v.GetObjectType) == "function" and tostring(k):match("[Mm]anastorm") then
+			foundAny = true
+			local ot = v:GetObjectType()
+			if ot == "Button" then
+				local n = tostring(k)
+				if n:match("Enter") then
+					manastormEnterButton = v
+				elseif n:match("DropDown") or n:match("Level") then
+					manastormLevelDropDown = manastormLevelDropDown or v
+				end
+			elseif ot == "Frame" and not manastormQueueFrame then
+				manastormQueueFrame = v
+			end
+		end
+	end
+	if not manastormEnterButton and manastormQueueFrame then
+		manastormEnterButton = ManastormFindEnterInChildren(manastormQueueFrame, 0, {})
+	end
+	return manastormQueueFrame, manastormEnterButton, manastormLevelDropDown, foundAny
+end
+
+local function ManastormLevelOneSelected(dropdown)
+	if not dropdown then
+		return true
+	end
+	local txt = ManastormFrameText(dropdown)
+	return txt and tonumber(txt:match("[Ll]evel%s*(%d+)")) == 1
+end
+
+local function GetManastormEnterState()
+	local queueFrame, enterButton, dropdown, uiLoaded = ResolveManastormFrames()
+	if not uiLoaded then
+		return "noload"
+	end
+	if not queueFrame or not enterButton then
+		return "missing"
+	end
+	if type(queueFrame.IsShown) == "function" and not queueFrame:IsShown() then
+		if type(queueFrame.Show) == "function" then
+			pcall(queueFrame.Show, queueFrame)
+		end
+		return "opened"
+	end
+	if not ManastormLevelOneSelected(dropdown) then
+		return "level"
+	end
+	if type(enterButton.IsEnabled) == "function" and not enterButton:IsEnabled() then
+		return "disabled"
+	end
+	return "ready", enterButton
+end
+
+function PrintManastormApi()
+	print(PREFIX .. "Manastorm diagnostics:")
+	local any = false
+	for k, v in pairs(_G) do
+		if type(v) == "table" and type(v.GetObjectType) == "function" and tostring(k):match("[Mm]anastorm") then
+			any = true
+			local shown = type(v.IsShown) == "function" and v:IsShown()
+			print("  " .. k .. " (" .. v:GetObjectType() .. ")" .. (shown and " [shown]" or ""))
+		end
+	end
+	if not any then
+		print("  No Manastorm frames in _G. Open Ascension's Mana Storm panel, then run /mslv api again.")
+	end
+	local ok, detail = pcall(function()
+		local qf, eb, dd, loaded = ResolveManastormFrames()
+		return "resolved: loaded=" .. tostring(loaded) .. " queue=" .. tostring(qf and qf:GetName() or "nil") .. " enter=" .. tostring(eb and eb:GetName() or "nil") .. " dropdown=" .. tostring(dd and dd:GetName() or "nil")
+	end)
+	print("  " .. (ok and detail or "resolve error"))
+end
+
 local featureButtons = {}
 local featureDefs = { { "Ready Check", "Ready" }, { "Enter MS 1", "EnterMS" }, { "Disband+Re-inv", "Disband" }, { "Anti-leech", "Anti" } }
 for i, def in ipairs(featureDefs) do
-	local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	local b
+	if def[2] == "EnterMS" then
+		b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
+		b:SetAttribute("type", "click")
+		b:SetAttribute("clickbutton", nil)
+		b:SetScript("PreClick", function(self)
+			self:SetAttribute("clickbutton", nil)
+			if not IsInRaid() then
+				print(PREFIX .. "You must be in a raid to enter Group Manastorm.")
+				return
+			end
+			local state, enterButton = GetManastormEnterState()
+			if state == "ready" then
+				self:SetAttribute("clickbutton", enterButton)
+			elseif state == "opened" then
+				print(PREFIX .. "Mana Storm panel opened. Select Level 1 on it, then click Enter MS 1 again.")
+			elseif state == "level" then
+				print(PREFIX .. "Select Level 1 on Ascension's Mana Storm panel first.")
+			elseif state == "disabled" then
+				print(PREFIX .. "Ascension's Enter Group Manastorm button is currently disabled.")
+			elseif state == "noload" then
+				print(PREFIX .. "Ascension's Mana Storm panel is not loaded. Open it once in-game (its own button/window), then click Enter MS 1 again. Run /mslv api if it still fails.")
+			else
+				print(PREFIX .. "Manastorm UI found but the Enter button is missing. Run /mslv api to inspect, or configure it with: /mslv enter <ButtonName>")
+			end
+		end)
+		b:SetScript("PostClick", function(self)
+			self:SetAttribute("clickbutton", nil)
+		end)
+	else
+		b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	end
 	StyleMSLButton(b)
 	b:SetSize(110, 22)
-	b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -220)
+	b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -268)
 	b:SetText(def[1])
-	b:SetScript("OnClick", function()
-		if def[2] == "Ready" then
-			DoFeatureReady()
-		elseif def[2] == "EnterMS" then
-			DoFeatureEnter()
-		elseif def[2] == "Disband" then
-			DoFeatureDisband()
-		elseif def[2] == "Anti" then
-			db.antileech = not db.antileech
-			b:SetText(db.antileech and "Anti-leech" or "Anti-leech*")
-			print(PREFIX .. "Anti-leech: " .. (db.antileech and "ON" or "OFF"))
-		end
-	end)
+	if def[2] ~= "EnterMS" then
+		b:SetScript("OnClick", function()
+			if def[2] == "Ready" then
+				DoFeatureReady()
+			elseif def[2] == "Disband" then
+				DoFeatureDisband()
+			elseif def[2] == "Anti" then
+				db.antileech = not db.antileech
+				b:SetText(db.antileech and "Anti-leech" or "Anti-leech*")
+				print(PREFIX .. "Anti-leech: " .. (db.antileech and "ON" or "OFF"))
+			end
+		end)
+	end
 	featureButtons[i] = b
 end
 refreshFeatureButtons = function()
@@ -2740,7 +3014,7 @@ end
 refreshFeatureButtons()
 
 local mtLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-mtLabel:SetPoint("TOPLEFT", 16, -286)
+mtLabel:SetPoint("TOPLEFT", 16, -330)
 mtLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 mtLabel:SetText("Mark MT (click = /maintank)")
 
@@ -2782,7 +3056,7 @@ function RefreshMTButtons()
 		if not b then
 			b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
 			b:SetSize(112, 24)
-			b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -300)
+			b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -344)
 			b:SetAttribute("type", "macro")
 			mtButtons[i] = b
 		end
@@ -2795,14 +3069,14 @@ end
 RefreshMTButtons()
 
 local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-chLabel:SetPoint("TOPLEFT", 16, -332)
+chLabel:SetPoint("TOPLEFT", 16, -376)
 chLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 chLabel:SetText("LFM channels (click to change, 0 = none):")
 
 local chButtons = {}
 for i = 1, 3 do
 	local b = CreateMSLButton(f, tostring(db.channels[i] or 0), 38, 24)
-	b:SetPoint("TOPLEFT", 240 + (i - 1) * 44, -346)
+	b:SetPoint("TOPLEFT", 240 + (i - 1) * 44, -390)
 	b:SetScript("OnClick", function(self)
 		db.channels[i] = ((db.channels[i] or 0) + 1) % 11
 		self:SetText(tostring(db.channels[i]))
@@ -2811,13 +3085,13 @@ for i = 1, 3 do
 end
 
 local candHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-candHeader:SetPoint("TOPLEFT", 16, -380)
+candHeader:SetPoint("TOPLEFT", 16, -424)
 candHeader:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 candHeader:SetText("Candidates (whispers):")
 
 candScroll = CreateFrame("ScrollFrame", "MSL201bCandScroll", f, "FauxScrollFrameTemplate")
-candScroll:SetPoint("TOPLEFT", 8, -392)
-candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -392)
+candScroll:SetPoint("TOPLEFT", 8, -436)
+candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -436)
 candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -600)
 candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -600)
 candScroll:SetScript("OnVerticalScroll", function(self, offset)
@@ -2832,7 +3106,7 @@ end)
 candRows = {}
 for i = 1, ROWS_CAND do
 	candRows[i] = CreateRow(f, true)
-	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -392 - (i - 1) * ROW_HEIGHT)
+	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -436 - (i - 1) * ROW_HEIGHT)
 end
 
 local candDivider = f:CreateTexture(nil, "BACKGROUND")
@@ -3116,6 +3390,8 @@ SlashCmdList["MSLV"] = function(arg)
 		print(PREFIX .. "Enter button set to " .. btn)
 	elseif cmd == "idle" or cmd == "rw" then
 		AnnounceIdle()
+	elseif cmd == "api" then
+		PrintManastormApi()
 	elseif cmd == "warnings" or cmd == "w" then
 		if ToggleFlagPanel then ToggleFlagPanel() end
 	else
