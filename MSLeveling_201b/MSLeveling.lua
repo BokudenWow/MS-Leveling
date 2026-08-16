@@ -55,6 +55,17 @@ db.flaggedPlayers = db.flaggedPlayers or {}
 if db.collecting == nil then
 	db.collecting = false
 end
+if db.candCollapsed == nil then
+	db.candCollapsed = true
+end
+if db.invCollapsed == nil then
+	db.invCollapsed = true
+end
+if db.panelLayoutV == nil then
+	db.candCollapsed = true
+	db.invCollapsed = true
+	db.panelLayoutV = 1
+end
 
 local ROLE_CYCLE = { Tank = "Heal", Heal = "DPS", DPS = "?", ["?"] = "Tank" }
 local ROLE_COLORS = {
@@ -456,7 +467,7 @@ local function RefreshCandidates()
 	for i = 1, ROWS_CAND do
 		local row = candRows[i]
 		local d = db.candidates[offset + i]
-		if d then
+		if d and not db.candCollapsed then
 			row:Show()
 			row.data = d
 			row.name:SetText(d.name)
@@ -485,7 +496,7 @@ local function RefreshInvited()
 	for i = 1, ROWS_INV do
 		local row = invRows[i]
 		local d = db.invited[offset + i]
-		if d then
+		if d and not db.invCollapsed then
 			row:Show()
 			row.data = d
 			row.name:SetText(d.name)
@@ -809,6 +820,7 @@ local function BuildNeedsList(t, h, d, a, tot)
 	if missing <= 0 or missing > 3 then
 		return nil
 	end
+	local roleIcons = { AURA = "{triangle}", Tank = "{circle}", Healer = "{square}", DPS = "{skull}" }
 	local needTank = math.max(0, MAX_TANK - t)
 	local needHeal = math.max(0, MAX_HEAL - h)
 	local needAura = math.max(0, MAX_AURA - a)
@@ -817,7 +829,7 @@ local function BuildNeedsList(t, h, d, a, tot)
 	if needAura > 0 then items[#items + 1] = { needAura, "AURA" } end
 	if needTank > 0 then items[#items + 1] = { needTank, "Tank" } end
 	if needHeal > 0 then items[#items + 1] = { needHeal, "Healer" } end
-	if needDPS > 0 then items[#items + 1] = { needDPS, "DPS" } end
+	if needDPS > 0 and (needTank > 0 or needHeal > 0) then items[#items + 1] = { needDPS, "DPS" } end
 	local parts = {}
 	local remaining = missing
 	for _, item in ipairs(items) do
@@ -826,7 +838,7 @@ local function BuildNeedsList(t, h, d, a, tot)
 		end
 		local n = math.min(item[1], remaining)
 		remaining = remaining - n
-		parts[#parts + 1] = n .. " " .. item[2]
+		parts[#parts + 1] = (roleIcons[item[2]] or "") .. n .. " " .. item[2]
 	end
 	if #parts == 0 then
 		return nil
@@ -915,6 +927,14 @@ function RefreshStatus()
 		local inv = db.invited[i]
 		if inv.status == "Pending" and inv.inviteTime and (now - inv.inviteTime) > 90 and not names[inv.name] then
 			print(PREFIX .. inv.name .. " did not accept the invite (timed out), slot freed.")
+			table.remove(db.invited, i)
+			changed = true
+		end
+	end
+	for i = #db.invited, 1, -1 do
+		local inv = db.invited[i]
+		if inv.status == "Joined" and not names[inv.name] then
+			print(PREFIX .. inv.name .. " left the raid, removed from the invited list.")
 			table.remove(db.invited, i)
 			changed = true
 		end
@@ -1831,20 +1851,29 @@ ApplyFrameToggle = function()
 	local show = pendingFrameShow
 	pendingFrameShow = nil
 	if f then
-		if show then
-			f:Show()
-			f:Raise()
-		else
-			f:Hide()
+		local ok = pcall(function()
+			if show then
+				f:Show()
+				f:Raise()
+			else
+				f:Hide()
+			end
+		end)
+		if not ok then
+			pendingFrameShow = show
 		end
 	end
 end
 
--- Toggle de la ventana principal. Se intenta mostrar/ocultar incluso en combate;
--- si el cliente bloquea el Show/Hide (frames protegidos con hijos SecureActionButton),
--- se difiere a PLAYER_REGEN_ENABLED.
+-- Toggle de la ventana principal. El frame contiene botones seguros (SecureActionButton),
+-- asi que Show/Hide en combate esta bloqueado por el cliente (taint) y pcall no lo captura.
+-- Se difiere SIEMPRE a PLAYER_REGEN_ENABLED cuando hay combate activo.
 FrameToggleRequest = function(show)
 	if f then
+		if InCombatLockdown() then
+			pendingFrameShow = show
+			return
+		end
 		local ok = pcall(function()
 			if show then
 				f:Show()
@@ -2424,7 +2453,7 @@ end
 
 local function CreateRow(parent, isCandidate)
 	local row = CreateFrame("Frame", nil, parent)
-	row:SetSize(620, ROW_HEIGHT)
+	row:SetSize(300, ROW_HEIGHT)
 	row.bg = row:CreateTexture(nil, "BACKGROUND")
 	row.bg:SetAllPoints(row)
 	row.bg:SetTexture(1, 1, 1, 0.05)
@@ -2438,16 +2467,16 @@ local function CreateRow(parent, isCandidate)
 	end)
 
 	row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.name:SetPoint("LEFT", 8, 0)
-	row.name:SetWidth(300)
+	row.name:SetPoint("LEFT", 4, 0)
+	row.name:SetWidth(104)
 	row.name:SetJustifyH("LEFT")
 
-	row.role = CreateMSLButton(row, "", 66, ROW_HEIGHT - 6)
-	row.role:SetPoint("LEFT", 318, 0)
+	row.role = CreateMSLButton(row, "", 38, ROW_HEIGHT - 6)
+	row.role:SetPoint("LEFT", 112, 0)
 	row.roleText = row.role:GetFontString()
 
-	row.aura = CreateMSLButton(row, "", 84, ROW_HEIGHT - 6)
-	row.aura:SetPoint("LEFT", 390, 0)
+	row.aura = CreateMSLButton(row, "", 42, ROW_HEIGHT - 6)
+	row.aura:SetPoint("LEFT", 154, 0)
 	row.auraText = row.aura:GetFontString()
 
 	row.role:SetScript("OnClick", function(self)
@@ -2466,8 +2495,8 @@ local function CreateRow(parent, isCandidate)
 	end)
 
 	if isCandidate then
-		row.action = CreateMSLButton(row, "Invite", 96, ROW_HEIGHT - 6)
-		row.action:SetPoint("LEFT", 484, 0)
+		row.action = CreateMSLButton(row, "Invite", 58, ROW_HEIGHT - 6)
+		row.action:SetPoint("LEFT", 200, 0)
 		row.actionText = row.action:GetFontString()
 		row.action:SetScript("OnClick", function(self)
 			local d = self:GetParent().data
@@ -2477,11 +2506,11 @@ local function CreateRow(parent, isCandidate)
 		end)
 	else
 		row.status = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.status:SetPoint("LEFT", 486, 0)
-		row.status:SetWidth(56)
+		row.status:SetPoint("LEFT", 196, 0)
+		row.status:SetWidth(54)
 		row.status:SetJustifyH("LEFT")
-		row.kick = CreateMSLButton(row, "Remove", 66, ROW_HEIGHT - 6)
-		row.kick:SetPoint("LEFT", 546, 0)
+		row.kick = CreateMSLButton(row, "Remove", 46, ROW_HEIGHT - 6)
+		row.kick:SetPoint("LEFT", 252, 0)
 		row.kickText = row.kick:GetFontString()
 		row.kick:SetScript("OnClick", function(self)
 			local d = self:GetParent().data
@@ -2814,7 +2843,7 @@ CheckAutoOff = function()
 end
 
 local resetBtn = CreateMSLButton(f, "Reset all data", 110, 22)
-resetBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 12)
+resetBtn:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", 644, -662)
 resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSL201B_RESET")
 end)
@@ -3084,16 +3113,127 @@ for i = 1, 3 do
 	chButtons[i] = b
 end
 
-local candHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-candHeader:SetPoint("TOPLEFT", 16, -424)
-candHeader:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
-candHeader:SetText("Candidates (whispers):")
+local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+hint:SetPoint("BOTTOMLEFT", 16, 8)
+hint:SetTextColor(0.55, 0.6, 0.7)
+hint:SetText("Click Role/Aura to edit | /ms201b toggles | /ms201rw idle")
+
+local function BuildListPanels()
+local PANEL_LEFT = 8
+local PANEL_MID = 328
+local PANEL_RIGHT = 652
+local PANEL_TOP = -420
+local LIST_TOP = -446
+local LIST_BOTTOM = -654
+
+local function CreateListHeader(x, w, text)
+	local bar = CreateFrame("Frame", nil, f)
+	bar:SetPoint("TOPLEFT", f, "TOPLEFT", x, PANEL_TOP)
+	bar:SetSize(w, 22)
+	bar:SetBackdrop({
+		bgFile = "Interface\\Buttons\\WHITE8X8",
+		edgeFile = "Interface\\Buttons\\WHITE8X8",
+		tile = true,
+		tileSize = 8,
+		edgeSize = 1,
+		insets = { left = 1, right = 1, top = 1, bottom = 1 },
+	})
+	bar:SetBackdropColor(THEME.panel2[1], THEME.panel2[2], THEME.panel2[3], THEME.panel2[4])
+	bar:SetBackdropBorderColor(0.4, 0.48, 0.65, 0.55)
+	local title = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	title:SetPoint("LEFT", 8, 0)
+	title:SetJustifyH("LEFT")
+	title:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
+	title:SetText(text)
+	return bar, title
+end
+
+local function CreateListToggle(bar)
+	local b = CreateFrame("Button", nil, bar)
+	b:SetSize(20, 20)
+	b:SetPoint("RIGHT", -4, 0)
+	b:SetNormalTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetNormalTexture():SetVertexColor(0.1, 0.15, 0.23, 1)
+	b:SetPushedTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetPushedTexture():SetVertexColor(0.06, 0.08, 0.12, 1)
+	b:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetHighlightTexture():SetVertexColor(0.22, 0.3, 0.42, 1)
+	local arrow = b:CreateTexture(nil, "OVERLAY")
+	arrow:SetSize(14, 14)
+	arrow:SetPoint("CENTER")
+	b.arrow = arrow
+	return b
+end
+
+local candBar, candHeader = CreateListHeader(PANEL_LEFT, PANEL_MID - PANEL_LEFT, "Candidates (whispers)")
+local invBar, invHeader = CreateListHeader(PANEL_MID + 4, PANEL_RIGHT - (PANEL_MID + 4), "Invited")
+local candToggle = CreateListToggle(candBar)
+local invToggle = CreateListToggle(invBar)
+
+local function SetListArrow(btn, expanded)
+	btn.arrow:SetTexture(expanded and "Interface\\Buttons\\ArrowDown" or "Interface\\Buttons\\ArrowRight")
+	btn.arrow:SetVertexColor(0.85, 0.9, 1, 1)
+end
+
+local function UpdateListPanelHeight()
+	local collapsed = db.candCollapsed and db.invCollapsed
+	local target = collapsed and 450 or 870
+	if math.floor(f:GetHeight() + 0.5) ~= target then
+		local px, py = f:GetLeft(), f:GetTop()
+		f:ClearAllPoints()
+		if px and py then
+			f:SetPoint("TOPLEFT", UIParent, "TOPLEFT", px, py)
+		else
+			f:SetPoint("CENTER")
+		end
+		f:SetSize(660, target)
+	end
+	if hint then
+		hint:SetShown(not collapsed)
+	end
+	if resetBtn then
+		resetBtn:SetShown(not collapsed)
+	end
+end
+
+local function SetCandCollapsed(collapsed)
+	db.candCollapsed = collapsed
+	candScroll:SetShown(not collapsed)
+	for _, r in ipairs(candRows) do
+		r:SetShown(not collapsed)
+	end
+	SetListArrow(candToggle, not collapsed)
+	if not collapsed then
+		RefreshCandidates()
+	end
+	UpdateListPanelHeight()
+end
+
+local function SetInvCollapsed(collapsed)
+	db.invCollapsed = collapsed
+	invScroll:SetShown(not collapsed)
+	for _, r in ipairs(invRows) do
+		r:SetShown(not collapsed)
+	end
+	SetListArrow(invToggle, not collapsed)
+	if not collapsed then
+		RefreshInvited()
+	end
+	UpdateListPanelHeight()
+end
+
+local vDivider = f:CreateTexture(nil, "BACKGROUND")
+vDivider:SetTexture("Interface\\Buttons\\WHITE8X8")
+vDivider:SetVertexColor(1, 1, 1, 0.12)
+vDivider:SetPoint("TOP", f, "TOPLEFT", PANEL_MID, PANEL_TOP)
+vDivider:SetPoint("BOTTOM", f, "TOPLEFT", PANEL_MID, LIST_BOTTOM)
+vDivider:SetWidth(1)
 
 candScroll = CreateFrame("ScrollFrame", "MSL201bCandScroll", f, "FauxScrollFrameTemplate")
-candScroll:SetPoint("TOPLEFT", 8, -436)
-candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -436)
-candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -600)
-candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -600)
+candScroll:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_LEFT, LIST_TOP)
+candScroll:SetPoint("TOPRIGHT", f, "TOPLEFT", PANEL_MID - 4, LIST_TOP)
+candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", PANEL_LEFT, LIST_BOTTOM)
+candScroll:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", PANEL_MID - 4, LIST_BOTTOM)
 candScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshCandidates)
 end)
@@ -3106,26 +3246,14 @@ end)
 candRows = {}
 for i = 1, ROWS_CAND do
 	candRows[i] = CreateRow(f, true)
-	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -436 - (i - 1) * ROW_HEIGHT)
+	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 10, LIST_TOP - (i - 1) * ROW_HEIGHT)
 end
 
-local candDivider = f:CreateTexture(nil, "BACKGROUND")
-candDivider:SetTexture("Interface\\Buttons\\WHITE8X8")
-candDivider:SetVertexColor(1, 1, 1, 0.12)
-candDivider:SetPoint("TOPLEFT", 10, -606)
-candDivider:SetPoint("TOPRIGHT", -12, -606)
-candDivider:SetHeight(1)
-
-local invHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-invHeader:SetPoint("TOPLEFT", 16, -618)
-invHeader:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
-invHeader:SetText("Invited:")
-
 invScroll = CreateFrame("ScrollFrame", "MSL201bInvScroll", f, "FauxScrollFrameTemplate")
-invScroll:SetPoint("TOPLEFT", 8, -630)
-invScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -630)
-invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -838)
-invScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -838)
+invScroll:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_MID + 4, LIST_TOP)
+invScroll:SetPoint("TOPRIGHT", f, "TOPLEFT", PANEL_RIGHT, LIST_TOP)
+invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", PANEL_MID + 4, LIST_BOTTOM)
+invScroll:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", PANEL_RIGHT, LIST_BOTTOM)
 invScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshInvited)
 end)
@@ -3138,13 +3266,20 @@ end)
 invRows = {}
 for i = 1, ROWS_INV do
 	invRows[i] = CreateRow(f, false)
-	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -630 - (i - 1) * ROW_HEIGHT)
+	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 334, LIST_TOP - (i - 1) * ROW_HEIGHT)
 end
 
-local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-hint:SetPoint("BOTTOMLEFT", 16, 8)
-hint:SetTextColor(0.55, 0.6, 0.7)
-hint:SetText("Click Role/Aura to edit | /ms201b toggles | /ms201rw idle")
+candToggle:SetScript("OnClick", function()
+	SetCandCollapsed(not db.candCollapsed)
+end)
+invToggle:SetScript("OnClick", function()
+	SetInvCollapsed(not db.invCollapsed)
+end)
+
+SetCandCollapsed(db.candCollapsed)
+SetInvCollapsed(db.invCollapsed)
+end
+BuildListPanels()
 
 local LEECH_PANEL_WIDTH = 300
 local LEECH_ROW_HEIGHT = 24
