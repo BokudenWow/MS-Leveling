@@ -32,8 +32,19 @@ if db.enterButtonName == nil then
 	db.enterButtonName = ""
 end
 
+db.compTank = db.compTank or 2
+db.compHeal = db.compHeal or 3
+
 local MAX_TANK, MAX_HEAL, MAX_DPS, MAX_AURA, MAX_TOTAL = 2, 3, 10, 3, 15
-local ROW_HEIGHT = 22
+local function ApplyComp()
+	MAX_TANK = math.max(1, math.min(3, tonumber(db.compTank) or 2))
+	MAX_HEAL = math.max(1, math.min(5, tonumber(db.compHeal) or 3))
+	db.compTank = MAX_TANK
+	db.compHeal = MAX_HEAL
+	MAX_DPS = math.max(1, MAX_TOTAL - MAX_TANK - MAX_HEAL)
+end
+ApplyComp()
+local ROW_HEIGHT = 26
 local ROWS_CAND = 8
 local ROWS_INV = 8
 
@@ -64,7 +75,7 @@ local THEME = {
 local chips
 
 local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows, finishBtn, title
-local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll
+local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll, SyncRaidRoster
 
 local collecting = db.collecting
 local memberReplies = db.memberReplies
@@ -168,7 +179,17 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		if HandleRaidChat then
 			HandleRaidChat(...)
 		end
-	elseif event == "GROUP_ROSTER_UPDATE" or event == "UNIT_LEVEL" or event == "PLAYER_LEVEL_UP" then
+	elseif event == "GROUP_ROSTER_UPDATE" then
+		if SyncRaidRoster then
+			SyncRaidRoster()
+		end
+		if RefreshStatus then
+			RefreshStatus()
+		end
+		if CheckRaidLevels then
+			CheckRaidLevels()
+		end
+	elseif event == "UNIT_LEVEL" or event == "PLAYER_LEVEL_UP" then
 		if RefreshStatus then
 			RefreshStatus()
 		end
@@ -510,7 +531,7 @@ local function RefreshCounts()
 			local _, cur, max = data[i][1], data[i][2], data[i][3]
 			local ratio = max > 0 and math.min(1, cur / max) or 0
 			ratio = math.max(0, ratio)
-			chip.bar:SetWidth(math.floor(74 * ratio))
+			chip.bar:SetWidth(math.floor((chip.barMax or 74) * ratio))
 			local cr, cg, cb
 			if max == 0 then
 				cr, cg, cb = 0.9, 0.4, 0.4
@@ -527,8 +548,12 @@ local function RefreshCounts()
 	end
 	if not counts then return end
 	counts:SetFormattedText(
-		"|cff66b3ffTanks|r |cff%s%d/2|r   |cff66b3ffHeals|r |cff%s%d/3|r   |cff66b3ffDPS|r |cff%s%d/10|r   |cff66b3ffAuras|r |cff%s%d/3|r   |cff66b3ffTotal|r |cff%s%d/15|r",
-		CountColor(t, 2), t, CountColor(h, 3), h, CountColor(d, 10), d, CountColor(a, MAX_AURA), a, CountColor(tot, 15), tot
+		"|cff66b3ffTanks|r |cff%s%d/%d|r   |cff66b3ffHeals|r |cff%s%d/%d|r   |cff66b3ffDPS|r |cff%s%d/%d|r   |cff66b3ffAuras|r |cff%s%d/%d|r   |cff66b3ffTotal|r |cff%s%d/%d|r",
+		CountColor(t, MAX_TANK), t, MAX_TANK,
+		CountColor(h, MAX_HEAL), h, MAX_HEAL,
+		CountColor(d, MAX_DPS), d, MAX_DPS,
+		CountColor(a, MAX_AURA), a, MAX_AURA,
+		CountColor(tot, MAX_TOTAL), tot, MAX_TOTAL
 	)
 end
 
@@ -553,11 +578,14 @@ RefreshAll = function()
 	RefreshCounts()
 	RefreshCandidates()
 	RefreshInvited()
+	if RefreshCompLabels then
+		RefreshCompLabels()
+	end
 	if finishBtn then
 		finishBtn:SetEnabled(collecting)
 	end
 	if title then
-		title:SetText("|cff66b3ffMS Leveling 2.1|r - Addon by Bokuden" .. (collecting and " |cff7dff7dCollecting...|r" or ""))
+		title:SetText("|cff66b3ffMS Leveling 2.04|r" .. (collecting and " |cff7dff7d[Collecting...]|r" or ""))
 	end
 end
 
@@ -606,7 +634,7 @@ end
 
 local function TryAutoInvite(name, fromChannel)
 	local _, cand = FindCandidate(name)
-	if not cand or not cand.role then
+	if not cand then
 		return false
 	end
 	local t, h, d, a, tot = GetCounts()
@@ -616,13 +644,24 @@ if tot >= MAX_TOTAL then
 		end
 		return false
 	end
+	local noRole = cand.role == nil or cand.role == "?"
+	if noRole then
+		-- No role stated: only auto-invite when they bring an aura and an aura slot is open.
+		if cand.aura == true and a < MAX_AURA then
+			print(PREFIX .. "Aura slot available for " .. name .. " (no role stated), auto-inviting.")
+			InvitePlayer(name)
+			return true
+		end
+		return false
+	end
 	local role = cand.role
 	local rejected = false
 	local rejectAura = false
+	local auraLastDps = cand.aura == true and d == MAX_DPS - 1
 	if role == "Tank" then
-		rejected = t >= MAX_TANK
+		rejected = t >= MAX_TANK and not auraLastDps
 	elseif role == "Heal" then
-		rejected = h >= MAX_HEAL
+		rejected = h >= MAX_HEAL and not auraLastDps
 	elseif role == "DPS" then
 		-- DPS without an aura may fill up to the base limit (7 = MAX_DPS - MAX_AURA).
 		-- When auras are missing we reserve even more slots for DPS with an Aura:
@@ -632,9 +671,9 @@ if tot >= MAX_TOTAL then
 		if auraReserve < MAX_AURA then
 			auraReserve = MAX_AURA
 		end
-		local auraCap = math.max(MAX_AURA, auraReserve)
 		if cand.aura == true then
-			rejected = d >= MAX_DPS or a >= auraCap
+			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
+			rejected = d >= MAX_DPS
 		else
 			rejected = d >= (MAX_DPS - auraReserve)
 			rejectAura = rejected and a < MAX_AURA
@@ -750,14 +789,19 @@ local function ResetAll()
 end
 
 local function BroadcastLFM()
-	local t, h, d, a = GetCounts()
-	local msg = string.format("LFM MS Leveling: {circle}Tank %d/2 {square}Heal %d/3 {skull}DPS %d/10 {triangle}Aura %d/3 - reply role + aura/no", t, h, d, a)
+	local t, h, d, a, tot = GetCounts()
+	local prefix = "LFM"
+	if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
+		prefix = "LF1M AURA AND GO"
+	end
+	local msg = string.format("%s MS Leveling: {circle}Tank %d/%d {square}Heal %d/%d {skull}DPS %d/%d {triangle}Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
 	local preview = string.format(
-		"|cffffd000[MS Leveling]|r |cff66b3ffLFM|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/2|r {square}|cff66b3ffHeal|r |cff%s%d/3|r {skull}|cff66b3ffDPS|r |cff%s%d/10|r {triangle}|cff66b3ffAura|r |cff%s%d/3|r |cff66b3ffreply role + aura/no|r",
-		CountColor(t, 2), t,
-		CountColor(h, 3), h,
-		CountColor(d, 10), d,
-		CountColor(a, MAX_AURA), a
+		"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+		prefix,
+		CountColor(t, MAX_TANK), t, MAX_TANK,
+		CountColor(h, MAX_HEAL), h, MAX_HEAL,
+		CountColor(d, MAX_DPS), d, MAX_DPS,
+		CountColor(a, MAX_AURA), a, MAX_AURA
 	)
 	local sent = 0
 	local failed = {}
@@ -905,6 +949,43 @@ function CleanLeavers(silent)
 	end
 	RefreshAll()
 	RefreshMTButtons()
+end
+
+local lastRaidRoster = {}
+local rosterSeen = false
+
+function SyncRaidRoster()
+	local now = {}
+	if IsInRaid() then
+		for i = 1, GetNumRaidMembers() do
+			local n = GetRaidRosterInfo(i)
+			if n then
+				now[n:gsub("%-.*", "")] = true
+			end
+		end
+	end
+	local changed = false
+	if rosterSeen then
+		for n in pairs(lastRaidRoster) do
+			if not now[n] then
+				changed = true
+				break
+			end
+		end
+		if not changed then
+			for n in pairs(now) do
+				if not lastRaidRoster[n] then
+					changed = true
+					break
+				end
+			end
+		end
+	end
+	rosterSeen = true
+	lastRaidRoster = now
+	if changed and IsInRaid() then
+		CleanLeavers(true)
+	end
 end
 
 function SortGroups()
@@ -1173,7 +1254,7 @@ function SortGroups()
 				end
 			end
 		end
-		local MT_ICONS = { 1, 5, 2, 3, 4, 6, 7, 8 }
+		local MT_ICONS = { 6, 2, 3, 4, 1, 5, 7, 8 }
 		local mtCommands = {}
 		local tankIndex = 0
 		for _, n in ipairs(roster) do
@@ -1305,10 +1386,10 @@ local function HasSlot(role, aura)
 		return false, REJECT_GROUP_FULL
 	end
 	if role == "Tank" then
-		if t >= MAX_TANK then return false, REJECT_ROLE_FULL end
+		if t >= MAX_TANK and not (aura == true and d == MAX_DPS - 1) then return false, REJECT_ROLE_FULL end
 		return true
 	elseif role == "Heal" then
-		if h >= MAX_HEAL then return false, REJECT_ROLE_FULL end
+		if h >= MAX_HEAL and not (aura == true and d == MAX_DPS - 1) then return false, REJECT_ROLE_FULL end
 		return true
 	elseif role == "DPS" then
 		local missing = math.max(0, MAX_AURA - a)
@@ -1316,9 +1397,9 @@ local function HasSlot(role, aura)
 		if auraReserve < MAX_AURA then
 			auraReserve = MAX_AURA
 		end
-		local auraCap = math.max(MAX_AURA, auraReserve)
 		if aura == true then
-			if d >= MAX_DPS or a >= auraCap then
+			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
+			if d >= MAX_DPS then
 				return false, REJECT_ROLE_FULL
 			end
 		else
@@ -1384,7 +1465,7 @@ function HandleWhisper(msg, author)
 	if role then
 		hasSlot, rejectReason = HasSlot(role, aura)
 	end
-	if role and hasSlot then
+	if (role or aura) and hasSlot then
 		TryAutoInvite(name)
 	end
 	if db.autoReply then
@@ -1667,29 +1748,32 @@ ApplyFrameToggle = function()
 	end
 end
 
--- Toggle the main window. Show/Hide is blocked in combat because the frame
--- contains SecureActionButtonTemplate children, so defer it to PLAYER_REGEN_ENABLED.
+-- Toggle de la ventana principal. Se intenta mostrar/ocultar incluso en combate;
+-- si el cliente bloquea el Show/Hide (frames protegidos con hijos SecureActionButton),
+-- se difiere a PLAYER_REGEN_ENABLED.
 FrameToggleRequest = function(show)
-	if InCombatLockdown() then
-		pendingFrameShow = show
-		return
-	end
-	pendingFrameShow = nil
 	if f then
-		if show then
-			f:Show()
-			f:Raise()
-		else
-			f:Hide()
+		local ok = pcall(function()
+			if show then
+				f:Show()
+				f:Raise()
+			else
+				f:Hide()
+			end
+			if flagPanel then
+				if not show then
+					flagPanel:Hide()
+				elseif next(flaggedPlayers) then
+					flagPanel:Show()
+				end
+			end
+		end)
+		if ok then
+			pendingFrameShow = nil
+			return
 		end
 	end
-	if flagPanel then
-		if not show then
-			flagPanel:Hide()
-		elseif next(flaggedPlayers) then
-			flagPanel:Show()
-		end
-	end
+	pendingFrameShow = show
 end
 
 -- Detect when a member actually leaves the raid and send the farewell then,
@@ -2048,42 +2132,61 @@ function CheckManastormEntry()
 end
 
 function DoFeatureEnter()
+	if not IsInRaid() then
+		print(PREFIX .. "You must be in a raid to enter Group Manastorm.")
+		return
+	end
+	local found = false
+	-- 1) custom configured frame name
 	local candidate = db.enterButtonName and type(db.enterButtonName) == "string" and _G[db.enterButtonName]
 	if db.enterButtonName and candidate and candidate:GetObjectType() ~= "Button" then
 		print(PREFIX .. "Configured button '" .. db.enterButtonName .. "' is not clickable.")
 	end
-	-- 1) custom configured frame name
 	if candidate then
+		found = true
 		local ok = pcall(candidate.Click, candidate, "LeftButton")
-		print(PREFIX .. (ok and "MS1 Enter pressed" or "Could not click") .. " (" .. db.enterButtonName .. ").")
-		return
+		if ok then
+			print(PREFIX .. "MS1 Enter pressed (" .. db.enterButtonName .. ").")
+			return
+		end
 	end
 	-- 2) Ascension's own API if present
 	if type(C_Manastorm) == "table" and type(C_Manastorm.Enter) == "function" then
-		local ok = pcall(C_Manastorm.Enter)
+		found = true
+		local ok = pcall(C_Manastorm.Enter, C_Manastorm)
 		if ok then
 			print(PREFIX .. "C_Manastorm.Enter called.")
 			return
 		end
 	end
-	-- 2b) secure-click through a dedicated template; Ascension's frame works only if the queue panel exists
+	-- 3) Ascension's Mana Storm panel button; open the panel first if hidden
 	local native = _G.ManastormQueueFrameRightPanelEnterButton
 	if native and native:GetObjectType() == "Button" then
+		found = true
+		local queueFrame = _G.ManastormQueueFrame
+		if queueFrame and type(queueFrame.IsShown) == "function" and not queueFrame:IsShown() and type(queueFrame.Show) == "function" then
+			pcall(queueFrame.Show, queueFrame)
+		end
 		local ok = pcall(native.Click, native, "LeftButton")
 		if ok then
 			print(PREFIX .. "Enter pressed (ManastormQueueFrameRightPanelEnterButton).")
 			return
 		end
 	end
-	-- 2c) Manastormer's helper global if it is installed
+	-- 4) Manastormer's helper global if it is installed
 	if type(ClickManastormEnter) == "function" then
+		found = true
 		local ok = pcall(ClickManastormEnter)
 		if ok then
 			print(PREFIX .. "Enter (ClickManastormEnter) done.")
 			return
 		end
 	end
-	print(PREFIX .. "No MS1 entry button found. Open Ascension's Mana Storm panel and click Enter Manastorm manually.")
+	if found then
+		print(PREFIX .. "Could not trigger Enter Manastorm (protected while in combat?). Open Ascension's Mana Storm panel and click Enter Manastorm manually.")
+	else
+		print(PREFIX .. "No MS1 entry button found. Open Ascension's Mana Storm panel and click Enter Manastorm manually.")
+	end
 end
 
 local disbandNames = {}
@@ -2125,13 +2228,12 @@ function DoFeatureDisband()
 		end
 	end
 	disbandPending = true
-	local started = GetTime()
 	local waitAnnounced = false
 	local function TryReinvite()
 		if not disbandPending then
 			return
 		end
-		if IsInInstance() and GetTime() - started < 90 then
+		if IsInInstance() then
 			if not waitAnnounced then
 				waitAnnounced = true
 				print(PREFIX .. "Waiting to leave the dungeon before re-inviting...")
@@ -2205,12 +2307,35 @@ function DoFeatureDisband()
 	After(3, TryReinvite)
 end
 
+local function StyleMSLButton(b)
+	b:SetNormalTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetNormalTexture():SetVertexColor(0.12, 0.16, 0.23, 1)
+	b:SetPushedTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetPushedTexture():SetVertexColor(0.06, 0.08, 0.12, 1)
+	b:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
+	b:GetHighlightTexture():SetVertexColor(0.22, 0.3, 0.42, 1)
+	local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+	fs:SetAllPoints(b)
+	fs:SetJustifyH("CENTER")
+	fs:SetJustifyV("MIDDLE")
+	fs:SetTextColor(0.82, 0.87, 0.95)
+	b:SetFontString(fs)
+	return b
+end
+
+local function CreateMSLButton(parent, text, w, h)
+	local b = StyleMSLButton(CreateFrame("Button", nil, parent))
+	b:SetSize(w, h)
+	b:SetText(text or "")
+	return b
+end
+
 local function CreateRow(parent, isCandidate)
 	local row = CreateFrame("Frame", nil, parent)
-	row:SetSize(360, ROW_HEIGHT)
+	row:SetSize(620, ROW_HEIGHT)
 	row.bg = row:CreateTexture(nil, "BACKGROUND")
 	row.bg:SetAllPoints(row)
-	row.bg:SetTexture(1, 1, 1, 0.06)
+	row.bg:SetTexture(1, 1, 1, 0.05)
 	row.bg:Hide()
 	row:EnableMouse(true)
 	row:SetScript("OnEnter", function(self)
@@ -2221,17 +2346,18 @@ local function CreateRow(parent, isCandidate)
 	end)
 
 	row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.name:SetPoint("LEFT", 2, 0)
-	row.name:SetWidth(150)
+	row.name:SetPoint("LEFT", 8, 0)
+	row.name:SetWidth(300)
 	row.name:SetJustifyH("LEFT")
 
-	row.role = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-	row.role:SetSize(52, ROW_HEIGHT - 4)
-	row.role:SetPoint("LEFT", 154, 0)
-	row.roleText = row.role:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.roleText:SetAllPoints(row.role)
-	row.roleText:SetJustifyH("CENTER")
-	row.roleText:SetJustifyV("MIDDLE")
+	row.role = CreateMSLButton(row, "", 66, ROW_HEIGHT - 6)
+	row.role:SetPoint("LEFT", 318, 0)
+	row.roleText = row.role:GetFontString()
+
+	row.aura = CreateMSLButton(row, "", 84, ROW_HEIGHT - 6)
+	row.aura:SetPoint("LEFT", 390, 0)
+	row.auraText = row.aura:GetFontString()
+
 	row.role:SetScript("OnClick", function(self)
 		local d = self:GetParent().data
 		if d then
@@ -2239,14 +2365,6 @@ local function CreateRow(parent, isCandidate)
 			RefreshAll()
 		end
 	end)
-
-	row.aura = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-	row.aura:SetSize(56, ROW_HEIGHT - 4)
-	row.aura:SetPoint("LEFT", 210, 0)
-	row.auraText = row.aura:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.auraText:SetAllPoints(row.aura)
-	row.auraText:SetJustifyH("CENTER")
-	row.auraText:SetJustifyV("MIDDLE")
 	row.aura:SetScript("OnClick", function(self)
 		local d = self:GetParent().data
 		if d then
@@ -2256,14 +2374,9 @@ local function CreateRow(parent, isCandidate)
 	end)
 
 	if isCandidate then
-		row.action = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-		row.action:SetSize(68, ROW_HEIGHT - 4)
-		row.action:SetPoint("LEFT", 274, 0)
-		row.actionText = row.action:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.actionText:SetAllPoints(row.action)
-		row.actionText:SetJustifyH("CENTER")
-		row.actionText:SetJustifyV("MIDDLE")
-		row.actionText:SetText("Invite")
+		row.action = CreateMSLButton(row, "Invite", 96, ROW_HEIGHT - 6)
+		row.action:SetPoint("LEFT", 484, 0)
+		row.actionText = row.action:GetFontString()
 		row.action:SetScript("OnClick", function(self)
 			local d = self:GetParent().data
 			if d then
@@ -2272,17 +2385,12 @@ local function CreateRow(parent, isCandidate)
 		end)
 	else
 		row.status = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.status:SetPoint("LEFT", 262, 0)
-		row.status:SetWidth(48)
+		row.status:SetPoint("LEFT", 486, 0)
+		row.status:SetWidth(56)
 		row.status:SetJustifyH("LEFT")
-		row.kick = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-		row.kick:SetSize(48, ROW_HEIGHT - 4)
-		row.kick:SetPoint("LEFT", 312, 0)
-		row.kickText = row.kick:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.kickText:SetAllPoints(row.kick)
-		row.kickText:SetJustifyH("CENTER")
-		row.kickText:SetJustifyV("MIDDLE")
-		row.kickText:SetText("Remove")
+		row.kick = CreateMSLButton(row, "Remove", 66, ROW_HEIGHT - 6)
+		row.kick:SetPoint("LEFT", 546, 0)
+		row.kickText = row.kick:GetFontString()
 		row.kick:SetScript("OnClick", function(self)
 			local d = self:GetParent().data
 			if d then
@@ -2294,7 +2402,7 @@ local function CreateRow(parent, isCandidate)
 end
 
 f = CreateFrame("Frame", "MSL201bFrame", UIParent)
-f:SetSize(460, 716)
+f:SetSize(660, 870)
 f:SetPoint("CENTER")
 f:SetBackdrop({
 	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -2304,8 +2412,8 @@ f:SetBackdrop({
 	edgeSize = 16,
 	insets = { left = 4, right = 4, top = 4, bottom = 4 },
 })
-f:SetBackdropColor(THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
-f:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], THEME.border[4])
+f:SetBackdropColor(THEME.bg[1], THEME.bg[2], THEME.bg[3], 0.96)
+f:SetBackdropBorderColor(0.12, 0.18, 0.3, 1)
 f:SetFrameStrata("DIALOG")
 f:EnableMouse(true)
 f:SetMovable(true)
@@ -2327,14 +2435,26 @@ end)
 
 local headerBar = f:CreateTexture(nil, "BACKGROUND")
 headerBar:SetTexture("Interface\\Buttons\\WHITE8X8")
-headerBar:SetVertexColor(THEME.panel[1], THEME.panel[2], THEME.panel[3], 1)
+headerBar:SetVertexColor(0.1, 0.15, 0.24, 1)
 headerBar:SetPoint("TOPLEFT", 1, -1)
 headerBar:SetPoint("TOPRIGHT", -1, -1)
-headerBar:SetHeight(46)
+headerBar:SetHeight(52)
+
+local headerLine = f:CreateTexture(nil, "BACKGROUND")
+headerLine:SetTexture("Interface\\Buttons\\WHITE8X8")
+headerLine:SetVertexColor(THEME.gold[1], THEME.gold[2], THEME.gold[3], 0.85)
+headerLine:SetPoint("TOPLEFT", 16, -48)
+headerLine:SetPoint("TOPRIGHT", -16, -48)
+headerLine:SetHeight(1)
 
 title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-title:SetPoint("TOPLEFT", 14, -10)
-title:SetText("|cff66b3ffMS Leveling 2.1|r - Addon by Bokuden")
+title:SetPoint("TOPLEFT", 18, -8)
+title:SetText("|cff66b3ffMS Leveling 2.04|r")
+
+local subtitle = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+subtitle:SetPoint("TOPLEFT", 18, -32)
+subtitle:SetTextColor(0.55, 0.6, 0.7)
+subtitle:SetText("Manastorm raid manager - by Bokuden")
 
 local closeBtn = CreateFrame("Button", nil, f, "UIPanelCloseButton")
 closeBtn:SetPoint("TOPRIGHT", -5, -5)
@@ -2350,72 +2470,136 @@ counts:SetJustifyH("LEFT")
 counts:Hide()
 
 chips = {}
+local chipWidth = 118
 for i = 1, 5 do
 	local chip = CreateFrame("Frame", nil, f)
-	chip:SetSize(84, 50)
-	chip:SetPoint("TOPLEFT", f, "TOPLEFT", 10 + (i - 1) * 90, -30)
+	chip:SetSize(chipWidth, 58)
+	chip:SetPoint("TOPLEFT", f, "TOPLEFT", 12 + (i - 1) * 128, -62)
 	chip:SetBackdrop({
 		bgFile = "Interface\\Buttons\\WHITE8X8",
 		edgeFile = "Interface\\Buttons\\WHITE8X8",
 		edgeSize = 1,
 		insets = { left = 1, right = 1, top = 1, bottom = 1 },
 	})
-	chip:SetBackdropColor(THEME.panel2[1], THEME.panel2[2], THEME.panel2[3], 1)
+	chip:SetBackdropColor(THEME.panel2[1], THEME.panel2[2], THEME.panel2[3], 0.9)
 	chip:SetBackdropBorderColor(THEME.border[1], THEME.border[2], THEME.border[3], 1)
 
 	local label = chip:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	label:SetPoint("TOP", 0, -4)
+	label:SetPoint("TOP", 0, -6)
 	label:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 	chip.label = label
 
-	chip.num = chip:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-	chip.num:SetPoint("BOTTOM", 0, 10)
+	chip.num = chip:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+	chip.num:SetPoint("CENTER", 0, 6)
 	chip.num:SetText("0/0")
 
 	chip.bar = chip:CreateTexture(nil, "ARTWORK")
 	chip.bar:SetTexture("Interface\\Buttons\\WHITE8X8")
-	chip.bar:SetWidth(74)
+	chip.bar:SetWidth(chipWidth - 16)
 	chip.bar:SetHeight(6)
-	chip.bar:SetPoint("BOTTOM", 0, 4)
+	chip.bar:SetPoint("BOTTOM", 0, 6)
 	chip.bar:SetVertexColor(1.0, 0.65, 0.2, 0.9)
+	chip.barMax = chipWidth - 16
 
 	chips[i] = chip
 end
-local chipDefs = { "Tanks", "Heals", "DPS", "Auras", "Total" }
+local chipDefs = { "TANKS", "HEALS", "DPS", "AURAS", "TOTAL" }
 for i, chip in ipairs(chips) do
 	chip.label:SetText(chipDefs[i])
 end
 
+local compRow = CreateFrame("Frame", nil, f)
+compRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -128)
+compRow:SetSize(620, 26)
+
+local compLabel = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+compLabel:SetPoint("LEFT", 0, 1)
+compLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
+compLabel:SetText("Comp:")
+
+local tankLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+tankLbl:SetPoint("LEFT", 52, 1)
+tankLbl:SetTextColor(0.85, 0.88, 0.95)
+tankLbl:SetText("Tank")
+
+local tankMinus = CreateMSLButton(compRow, "-", 24, 24)
+tankMinus:SetPoint("LEFT", 92, 0)
+local tankVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+tankVal:SetPoint("LEFT", 120, 0)
+tankVal:SetWidth(34)
+tankVal:SetJustifyH("CENTER")
+tankVal:SetTextColor(1.0, 0.6, 0.3)
+local tankPlus = CreateMSLButton(compRow, "+", 24, 24)
+tankPlus:SetPoint("LEFT", 158, 0)
+
+local healLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+healLbl:SetPoint("LEFT", 210, 1)
+healLbl:SetTextColor(0.85, 0.88, 0.95)
+healLbl:SetText("Heal")
+local healMinus = CreateMSLButton(compRow, "-", 24, 24)
+healMinus:SetPoint("LEFT", 250, 0)
+local healVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+healVal:SetPoint("LEFT", 278, 0)
+healVal:SetWidth(34)
+healVal:SetJustifyH("CENTER")
+healVal:SetTextColor(0.3, 1.0, 0.5)
+local healPlus = CreateMSLButton(compRow, "+", 24, 24)
+healPlus:SetPoint("LEFT", 316, 0)
+
+local dpsLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+dpsLbl:SetPoint("LEFT", 372, 1)
+dpsLbl:SetTextColor(0.85, 0.88, 0.95)
+dpsLbl:SetText("DPS (auto)")
+local dpsVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+dpsVal:SetPoint("LEFT", 448, 0)
+dpsVal:SetWidth(44)
+dpsVal:SetJustifyH("CENTER")
+dpsVal:SetTextColor(1.0, 0.85, 0.2)
+
+local function changeComp(key, delta, lo, hi)
+	local v = math.max(lo, math.min(hi, (tonumber(db[key]) or lo) + delta))
+	if db[key] ~= v then
+		db[key] = v
+		ApplyComp()
+		RefreshCompLabels()
+		RefreshAll()
+		RefreshMTButtons()
+	end
+end
+tankMinus:SetScript("OnClick", function() changeComp("compTank", -1, 1, 3) end)
+tankPlus:SetScript("OnClick", function() changeComp("compTank", 1, 1, 3) end)
+healMinus:SetScript("OnClick", function() changeComp("compHeal", -1, 1, 5) end)
+healPlus:SetScript("OnClick", function() changeComp("compHeal", 1, 1, 5) end)
+
+RefreshCompLabels = function()
+	if tankVal then tankVal:SetText(MAX_TANK) end
+	if healVal then healVal:SetText(MAX_HEAL) end
+	if dpsVal then dpsVal:SetText(MAX_DPS) end
+end
+RefreshCompLabels()
+
 RefreshCounts()
 
 selfRow = CreateFrame("Frame", nil, f)
-selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 10, -88)
-selfRow:SetSize(360, ROW_HEIGHT)
+selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -252)
+selfRow:SetSize(620, ROW_HEIGHT)
 
 selfRow.name = selfRow:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-selfRow.name:SetPoint("LEFT", 2, 0)
-selfRow.name:SetWidth(150)
+selfRow.name:SetPoint("LEFT", 8, 0)
+selfRow.name:SetWidth(300)
 selfRow.name:SetJustifyH("LEFT")
 
-local selfRole = CreateFrame("Button", nil, selfRow, "UIPanelButtonTemplate")
-selfRole:SetSize(52, ROW_HEIGHT - 4)
-selfRole:SetPoint("LEFT", 154, 0)
-selfRoleText = selfRole:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-selfRoleText:SetAllPoints(selfRole)
-selfRoleText:SetJustifyH("CENTER")
-selfRoleText:SetJustifyV("MIDDLE")
+local selfRole = CreateMSLButton(selfRow, "", 70, ROW_HEIGHT - 6)
+selfRole:SetPoint("LEFT", 320, 0)
+selfRoleText = selfRole:GetFontString()
 selfRole:SetScript("OnClick", function()
 	db.me.role = ROLE_CYCLE[db.me.role or "?"]
 	RefreshAll()
 end)
 
-local selfAura = CreateFrame("Button", nil, selfRow, "UIPanelButtonTemplate")
-selfAura:SetSize(56, ROW_HEIGHT - 4)
-selfAura:SetPoint("LEFT", 210, 0)
-selfAuraText = selfAura:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-selfAuraText:SetAllPoints(selfAura)
-selfAuraText:SetJustifyH("CENTER")
-selfAuraText:SetJustifyV("MIDDLE")
+local selfAura = CreateMSLButton(selfRow, "", 84, ROW_HEIGHT - 6)
+selfAura:SetPoint("LEFT", 396, 0)
+selfAuraText = selfAura:GetFontString()
 selfAura:SetScript("OnClick", function()
 	if db.me.aura == nil then
 		db.me.aura = true
@@ -2427,40 +2611,50 @@ selfAura:SetScript("OnClick", function()
 	RefreshAll()
 end)
 
-local lfmBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-lfmBtn:SetSize(90, 22)
-lfmBtn:SetPoint("TOPLEFT", 10, -118)
-lfmBtn:SetText("Post LFM")
+local lfmBtn = CreateMSLButton(f, "Post LFM", 96, 22)
+lfmBtn:SetPoint("TOPLEFT", 12, -164)
 lfmBtn:SetScript("OnClick", BroadcastLFM)
 
-local autoLFMBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-autoLFMBtn:SetSize(102, 22)
+local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoLFM: On" or "AutoLFM: Off", 100, 22)
 autoLFMBtn:SetPoint("LEFT", lfmBtn, "RIGHT", 6, 0)
-autoLFMBtn:SetText(db.autoLFM and "AutoLFM: On" or "AutoLFM: Off")
 autoLFMBtn:SetScript("OnClick", function(self)
 	db.autoLFM = not db.autoLFM
 	UpdateAutoButtons()
 	print(PREFIX .. "Auto-LFM (auto-post every 30s): " .. (db.autoLFM and "ON" or "OFF"))
 end)
 
-local autoLFGBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-autoLFGBtn:SetSize(108, 22)
+local autoLFGBtn = CreateMSLButton(f, db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF", 106, 22)
 autoLFGBtn:SetPoint("LEFT", autoLFMBtn, "RIGHT", 6, 0)
-autoLFGBtn:SetText(db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF")
 autoLFGBtn:SetScript("OnClick", function(self)
 	db.autoLFG = not db.autoLFG
 	UpdateAutoButtons()
 	print(PREFIX .. "Auto-LFG (auto-invite from selected channels): " .. (db.autoLFG and "ON" or "OFF"))
 end)
 
-local autoBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-autoBtn:SetSize(102, 22)
+local autoBtn = CreateMSLButton(f, db.autoReply and "AutoReply: On" or "AutoReply: Off", 100, 22)
 autoBtn:SetPoint("LEFT", autoLFGBtn, "RIGHT", 6, 0)
-autoBtn:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
 autoBtn:SetScript("OnClick", function(self)
 	db.autoReply = not db.autoReply
 	UpdateAutoButtons()
 	print(PREFIX .. "Automatic whisper reply: " .. (db.autoReply and "enabled" or "disabled"))
+end)
+
+local raidBtn = CreateMSLButton(f, "Load Raid", 96, 22)
+raidBtn:SetPoint("TOPLEFT", 12, -192)
+raidBtn:SetScript("OnClick", LoadRaid)
+
+finishBtn = CreateMSLButton(f, "Finish Count", 110, 22)
+finishBtn:SetPoint("LEFT", raidBtn, "RIGHT", 6, 0)
+finishBtn:SetScript("OnClick", FinalizeCollect)
+
+local sortBtn = CreateMSLButton(f, "Sort Groups", 110, 22)
+sortBtn:SetPoint("LEFT", finishBtn, "RIGHT", 6, 0)
+sortBtn:SetScript("OnClick", SortGroups)
+
+local cleanBtn = CreateMSLButton(f, "Update raid", 104, 22)
+cleanBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
+cleanBtn:SetScript("OnClick", function()
+	CleanLeavers()
 end)
 
 UpdateAutoButtons = function()
@@ -2476,9 +2670,26 @@ UpdateAutoButtons = function()
 end
 UpdateAutoButtons()
 
+local fullWiped = false
+local autoSortDone = false
 CheckAutoOff = function()
 	local _, _, _, _, tot = GetCounts()
-	if tot >= MAX_TOTAL and (db.autoLFM or db.autoLFG) then
+	if tot >= MAX_TOTAL then
+		if not fullWiped then
+			fullWiped = true
+			if #db.candidates > 0 then
+				wipe(db.candidates)
+				print(PREFIX .. "Raid complete (15/15), candidate list cleared.")
+				RefreshCandidates()
+			end
+		end
+		if not autoSortDone then
+			autoSortDone = true
+			if (IsRaidLeader() or IsRaidOfficer()) then
+				print(PREFIX .. "Raid full, sorting groups automatically.")
+				SortGroups()
+			end
+		end
 		if db.autoLFM then
 			db.autoLFM = false
 			print(PREFIX .. "Raid full (15/15), Auto-LFM disabled.")
@@ -2488,96 +2699,31 @@ CheckAutoOff = function()
 			print(PREFIX .. "Raid full (15/15), Auto-LFG disabled.")
 		end
 		UpdateAutoButtons()
+	else
+		fullWiped = false
+		autoSortDone = false
 	end
 end
 
-local resetBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-resetBtn:SetSize(110, 22)
+local resetBtn = CreateMSLButton(f, "Reset all data", 110, 22)
 resetBtn:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -16, 12)
-resetBtn:SetText("Reset all data")
 resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSL201B_RESET")
-end)
-
-local raidBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-raidBtn:SetSize(100, 22)
-raidBtn:SetPoint("TOPLEFT", 10, -144)
-raidBtn:SetText("Load Raid")
-raidBtn:SetScript("OnClick", LoadRaid)
-
-finishBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-finishBtn:SetSize(106, 22)
-finishBtn:SetPoint("LEFT", raidBtn, "RIGHT", 6, 0)
-finishBtn:SetText("Finish Count")
-finishBtn:SetScript("OnClick", FinalizeCollect)
-
-local sortBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-sortBtn:SetSize(106, 22)
-sortBtn:SetPoint("LEFT", finishBtn, "RIGHT", 6, 0)
-sortBtn:SetText("Sort Groups")
-sortBtn:SetScript("OnClick", SortGroups)
-
-local cleanBtn = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-cleanBtn:SetSize(100, 22)
-cleanBtn:SetPoint("LEFT", sortBtn, "RIGHT", 6, 0)
-cleanBtn:SetText("Update raid")
-cleanBtn:SetScript("OnClick", function()
-	CleanLeavers()
 end)
 
 local featureButtons = {}
 local featureDefs = { { "Ready Check", "Ready" }, { "Enter MS 1", "EnterMS" }, { "Disband+Re-inv", "Disband" }, { "Anti-leech", "Anti" } }
 for i, def in ipairs(featureDefs) do
-	local b
-	if def[2] == "EnterMS" then
-		b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
-		b:SetAttribute("type", "click")
-		b:SetAttribute("clickbutton", nil)
-		b:SetScript("PreClick", function(self)
-			self:SetAttribute("clickbutton", nil)
-			local native = _G.ManastormQueueFrameRightPanelEnterButton
-			if not native or native:GetObjectType() ~= "Button" then
-				return
-			end
-			if not IsInRaid() then
-				print(PREFIX .. "You must be in a raid to enter Group Manastorm.")
-				return
-			end
-			local queueFrame = _G.ManastormQueueFrame
-			if queueFrame and type(queueFrame.IsShown) == "function" and not queueFrame:IsShown() then
-				print(PREFIX .. "Open Ascension's Mana Storm panel and select Level 1, then click Enter MS 1 again.")
-				return
-			end
-			local dropdown = _G.ManastormQueueFrameRightPanelLevelDropDown
-			if dropdown then
-				local txt = type(dropdown.GetText) == "function" and dropdown:GetText() or ""
-				if tonumber(tostring(txt):match("[Ll]evel%s*(%d+)")) ~= 1 then
-					print(PREFIX .. "Select Level 1 on Ascension's Mana Storm panel first.")
-					return
-				end
-			end
-			if type(native.IsEnabled) == "function" and not native:IsEnabled() then
-				print(PREFIX .. "Ascension's Enter Group Manastorm button is currently disabled.")
-				return
-			end
-			self:SetAttribute("clickbutton", native)
-		end)
-		b:SetScript("PostClick", function(self)
-			self:SetAttribute("clickbutton", nil)
-		end)
-	else
-		b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	end
-	b:SetSize(106, 20)
-	b:SetPoint("TOPLEFT", 10 + (i - 1) * 112, -170)
+	local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+	StyleMSLButton(b)
+	b:SetSize(110, 22)
+	b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -220)
 	b:SetText(def[1])
 	b:SetScript("OnClick", function()
 		if def[2] == "Ready" then
 			DoFeatureReady()
 		elseif def[2] == "EnterMS" then
-			if not _G.ManastormQueueFrameRightPanelEnterButton then
-				DoFeatureEnter()
-			end
+			DoFeatureEnter()
 		elseif def[2] == "Disband" then
 			DoFeatureDisband()
 		elseif def[2] == "Anti" then
@@ -2594,7 +2740,8 @@ end
 refreshFeatureButtons()
 
 local mtLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-mtLabel:SetPoint("TOPLEFT", 16, -194)
+mtLabel:SetPoint("TOPLEFT", 16, -286)
+mtLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 mtLabel:SetText("Mark MT (click = /maintank)")
 
 local mtButtons = {}
@@ -2634,11 +2781,12 @@ function RefreshMTButtons()
 		local b = mtButtons[i]
 		if not b then
 			b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
-			b:SetSize(112, 22)
-			b:SetPoint("TOPLEFT", 16 + (i - 1) * 118, -202)
+			b:SetSize(112, 24)
+			b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -300)
 			b:SetAttribute("type", "macro")
 			mtButtons[i] = b
 		end
+		StyleMSLButton(b)
 		b:SetText("MT: " .. name)
 		b:SetAttribute("macrotext", "/maintank " .. name)
 		b:Show()
@@ -2647,15 +2795,14 @@ end
 RefreshMTButtons()
 
 local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-chLabel:SetPoint("TOPLEFT", 16, -228)
+chLabel:SetPoint("TOPLEFT", 16, -332)
+chLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 chLabel:SetText("LFM channels (click to change, 0 = none):")
 
 local chButtons = {}
 for i = 1, 3 do
-	local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-	b:SetSize(36, 20)
-	b:SetPoint("TOPLEFT", 220 + (i - 1) * 42, -228)
-	b:SetText(tostring(db.channels[i] or 0))
+	local b = CreateMSLButton(f, tostring(db.channels[i] or 0), 38, 24)
+	b:SetPoint("TOPLEFT", 240 + (i - 1) * 44, -346)
 	b:SetScript("OnClick", function(self)
 		db.channels[i] = ((db.channels[i] or 0) + 1) % 11
 		self:SetText(tostring(db.channels[i]))
@@ -2664,14 +2811,15 @@ for i = 1, 3 do
 end
 
 local candHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-candHeader:SetPoint("TOPLEFT", 16, -256)
+candHeader:SetPoint("TOPLEFT", 16, -380)
+candHeader:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 candHeader:SetText("Candidates (whispers):")
 
 candScroll = CreateFrame("ScrollFrame", "MSL201bCandScroll", f, "FauxScrollFrameTemplate")
-candScroll:SetPoint("TOPLEFT", 8, -268)
-candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -268)
-candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -444)
-candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -444)
+candScroll:SetPoint("TOPLEFT", 8, -392)
+candScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -392)
+candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -600)
+candScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -600)
 candScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshCandidates)
 end)
@@ -2684,25 +2832,26 @@ end)
 candRows = {}
 for i = 1, ROWS_CAND do
 	candRows[i] = CreateRow(f, true)
-	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -268 - (i - 1) * ROW_HEIGHT)
+	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -392 - (i - 1) * ROW_HEIGHT)
 end
 
 local candDivider = f:CreateTexture(nil, "BACKGROUND")
 candDivider:SetTexture("Interface\\Buttons\\WHITE8X8")
 candDivider:SetVertexColor(1, 1, 1, 0.12)
-candDivider:SetPoint("TOPLEFT", 10, -450)
-candDivider:SetPoint("TOPRIGHT", -12, -450)
+candDivider:SetPoint("TOPLEFT", 10, -606)
+candDivider:SetPoint("TOPRIGHT", -12, -606)
 candDivider:SetHeight(1)
 
 local invHeader = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-invHeader:SetPoint("TOPLEFT", 16, -456)
+invHeader:SetPoint("TOPLEFT", 16, -618)
+invHeader:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 invHeader:SetText("Invited:")
 
 invScroll = CreateFrame("ScrollFrame", "MSL201bInvScroll", f, "FauxScrollFrameTemplate")
-invScroll:SetPoint("TOPLEFT", 8, -468)
-invScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -468)
-invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -644)
-invScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -644)
+invScroll:SetPoint("TOPLEFT", 8, -630)
+invScroll:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -630)
+invScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", 8, -838)
+invScroll:SetPoint("BOTTOMRIGHT", f, "TOPRIGHT", -24, -838)
 invScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshInvited)
 end)
@@ -2715,11 +2864,12 @@ end)
 invRows = {}
 for i = 1, ROWS_INV do
 	invRows[i] = CreateRow(f, false)
-	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -468 - (i - 1) * ROW_HEIGHT)
+	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -630 - (i - 1) * ROW_HEIGHT)
 end
 
 local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 hint:SetPoint("BOTTOMLEFT", 16, 8)
+hint:SetTextColor(0.55, 0.6, 0.7)
 hint:SetText("Click Role/Aura to edit | /ms201b toggles | /ms201rw idle")
 
 local LEECH_PANEL_WIDTH = 300

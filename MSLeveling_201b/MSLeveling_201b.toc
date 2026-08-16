@@ -1,8 +1,8 @@
 ## Interface: 30300
-## Title: MSLeveling 2.0.1b
-## Notes: MS Leveling 2.0.1 beta - gestor de raids con ready check.
+## Title: MSLeveling 2.04
+## Notes: MS Leveling 2.04 - gestor de raids con ready check.
 ## Author: Bokuden
-## Version: 2.0.1b
+## Version: 2.04
 ## SavedVariables: MSLeveling201bDB
 
 MSLeveling.lua
