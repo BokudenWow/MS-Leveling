@@ -1,4 +1,6 @@
-MS Leveling 2.01b Addon for Manastorm — Usage Guide
+Release is moar tested, download RELEASE < BUGS. FOLDER Latest version > BUGS
+
+MS Leveling 2.04c Addon for Manastorm — Usage Guide
 
 Auto buttons
 Post LFM — posts group counts to configured channels.
