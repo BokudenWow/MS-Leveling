@@ -28,6 +28,9 @@ end
 if db.autoLFM == nil then
 	db.autoLFM = false
 end
+if db.autoInviteWhisper == nil then
+	db.autoInviteWhisper = false
+end
 if db.enterButtonName == nil then
 	db.enterButtonName = ""
 end
@@ -86,7 +89,7 @@ local THEME = {
 local chips
 
 local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows, finishBtn, title
-local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll, SyncRaidRoster
+local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll, SyncRaidRoster, chButtons, MigrateChannelNames
 
 local collecting = db.collecting
 local memberReplies = db.memberReplies
@@ -224,6 +227,9 @@ addon:SetScript("OnEvent", function(self, event, ...)
 			FlushPendingKicks()
 		end
 	elseif event == "PLAYER_LOGIN" then
+		if MigrateChannelNames then
+			MigrateChannelNames()
+		end
 		if db.framePos and type(db.framePos) == "table" and f then
 			f:ClearAllPoints()
 			f:SetPoint("TOPLEFT", UIParent, "TOPLEFT", db.framePos[1], db.framePos[2])
@@ -820,13 +826,12 @@ local function BuildNeedsList(t, h, d, a, tot)
 	if missing <= 0 or missing > 3 then
 		return nil
 	end
-	local roleIcons = { AURA = "{triangle}", Tank = "{circle}", Healer = "{square}", DPS = "{skull}" }
 	local needTank = math.max(0, MAX_TANK - t)
 	local needHeal = math.max(0, MAX_HEAL - h)
 	local needAura = math.max(0, MAX_AURA - a)
 	local needDPS = math.max(0, missing - needTank - needHeal - needAura)
 	local items = {}
-	if needAura > 0 then items[#items + 1] = { needAura, "AURA" } end
+	if needAura > 0 then items[#items + 1] = { needAura, "Aura" } end
 	if needTank > 0 then items[#items + 1] = { needTank, "Tank" } end
 	if needHeal > 0 then items[#items + 1] = { needHeal, "Healer" } end
 	if needDPS > 0 and (needTank > 0 or needHeal > 0) then items[#items + 1] = { needDPS, "DPS" } end
@@ -838,12 +843,12 @@ local function BuildNeedsList(t, h, d, a, tot)
 		end
 		local n = math.min(item[1], remaining)
 		remaining = remaining - n
-		parts[#parts + 1] = (roleIcons[item[2]] or "") .. n .. " " .. item[2]
+		parts[#parts + 1] = n .. " " .. item[2]
 	end
 	if #parts == 0 then
 		return nil
 	end
-	return table.concat(parts, " | ")
+	return table.concat(parts, ", ")
 end
 
 local function BroadcastLFM()
@@ -860,7 +865,7 @@ local function BroadcastLFM()
 		if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
 			prefix = "LF1M AURA AND GO"
 		end
-		msg = string.format("%s MS Leveling: {circle}Tank %d/%d {square}Heal %d/%d {skull}DPS %d/%d {triangle}Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
+		msg = string.format("%s MS Leveling: Tank %d/%d Heal %d/%d DPS %d/%d Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
 		preview = string.format(
 			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
 			prefix,
@@ -876,11 +881,10 @@ local function BroadcastLFM()
 	local joined = {}
 	for i = 1, 50 do
 		local num, name = GetChannelName(i)
-		if not name then
-			break
+		if name then
+			channelNames[num] = name
+			table.insert(joined, name .. " (" .. num .. ")")
 		end
-		channelNames[num] = name
-		table.insert(joined, name .. " (" .. num .. ")")
 	end
 	for i = 1, 3 do
 		local ch = db.channels[i]
@@ -1577,7 +1581,7 @@ function HandleWhisper(msg, author)
 		hasSlot, rejectReason = HasSlot(role, aura)
 	end
 	local invitedNow = false
-	if (role or aura) and hasSlot then
+	if (role or aura) and hasSlot and db.autoInviteWhisper then
 		invitedNow = TryAutoInvite(name) or false
 	end
 	if db.autoReply then
@@ -1607,12 +1611,11 @@ local function ChannelNumberFromName(channelName)
 	if base ~= "" then
 		for i = 1, 50 do
 			local num, name = GetChannelName(i)
-			if not name then
-				break
-			end
-			local cleanName = name:gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
-			if cleanName == base then
-				return num
+			if name then
+				local cleanName = name:gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
+				if cleanName == base then
+					return num
+				end
 			end
 		end
 	end
@@ -2748,28 +2751,36 @@ local lfmBtn = CreateMSLButton(f, "Post LFM", 96, 22)
 lfmBtn:SetPoint("TOPLEFT", 12, -176)
 lfmBtn:SetScript("OnClick", BroadcastLFM)
 
-local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoLFM: On" or "AutoLFM: Off", 100, 22)
+local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoSPAM-LFM (30s): On" or "AutoSPAM-LFM (30s): Off", 160, 22)
 autoLFMBtn:SetPoint("LEFT", lfmBtn, "RIGHT", 6, 0)
 autoLFMBtn:SetScript("OnClick", function(self)
 	db.autoLFM = not db.autoLFM
 	UpdateAutoButtons()
-	print(PREFIX .. "Auto-LFM (auto-post every 30s): " .. (db.autoLFM and "ON" or "OFF"))
+	print(PREFIX .. "AutoSPAM-LFM (auto-post every 30s): " .. (db.autoLFM and "ON" or "OFF"))
 end)
 
-local autoLFGBtn = CreateMSLButton(f, db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF", 106, 22)
+local autoLFGBtn = CreateMSLButton(f, db.autoLFG and "AutoInviteLFG: On" or "AutoInviteLFG: Off", 118, 22)
 autoLFGBtn:SetPoint("LEFT", autoLFMBtn, "RIGHT", 6, 0)
 autoLFGBtn:SetScript("OnClick", function(self)
 	db.autoLFG = not db.autoLFG
 	UpdateAutoButtons()
-	print(PREFIX .. "Auto-LFG (auto-invite from selected channels): " .. (db.autoLFG and "ON" or "OFF"))
+	print(PREFIX .. "AutoInviteLFG (auto-invite from selected channels): " .. (db.autoLFG and "ON" or "OFF"))
 end)
 
-local autoBtn = CreateMSLButton(f, db.autoReply and "AutoReply: On" or "AutoReply: Off", 100, 22)
+local autoBtn = CreateMSLButton(f, db.autoReply and "AutoReply: On" or "AutoReply: Off", 96, 22)
 autoBtn:SetPoint("LEFT", autoLFGBtn, "RIGHT", 6, 0)
 autoBtn:SetScript("OnClick", function(self)
 	db.autoReply = not db.autoReply
 	UpdateAutoButtons()
 	print(PREFIX .. "Automatic whisper reply: " .. (db.autoReply and "enabled" or "disabled"))
+end)
+
+local autoWhisperBtn = CreateMSLButton(f, db.autoInviteWhisper and "AutoInviteWhisper: On" or "AutoInviteWhisper: Off", 142, 22)
+autoWhisperBtn:SetPoint("LEFT", autoBtn, "RIGHT", 6, 0)
+autoWhisperBtn:SetScript("OnClick", function(self)
+	db.autoInviteWhisper = not db.autoInviteWhisper
+	UpdateAutoButtons()
+	print(PREFIX .. "AutoInviteWhisper (auto-invite from whispers): " .. (db.autoInviteWhisper and "ON" or "OFF"))
 end)
 
 local raidBtn = CreateMSLButton(f, "Load Raid", 96, 22)
@@ -2792,13 +2803,16 @@ end)
 
 UpdateAutoButtons = function()
 	if autoLFMBtn then
-		autoLFMBtn:SetText(db.autoLFM and "AutoLFM: On" or "AutoLFM: Off")
+		autoLFMBtn:SetText(db.autoLFM and "AutoSPAM-LFM (30s): On" or "AutoSPAM-LFM (30s): Off")
 	end
 	if autoLFGBtn then
-		autoLFGBtn:SetText(db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF")
+		autoLFGBtn:SetText(db.autoLFG and "AutoInviteLFG: On" or "AutoInviteLFG: Off")
 	end
 	if autoBtn then
 		autoBtn:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
+	end
+	if autoWhisperBtn then
+		autoWhisperBtn:SetText(db.autoInviteWhisper and "AutoInviteWhisper: On" or "AutoInviteWhisper: Off")
 	end
 end
 UpdateAutoButtons()
@@ -2834,6 +2848,10 @@ CheckAutoOff = function()
 		if db.autoLFG then
 			db.autoLFG = false
 			print(PREFIX .. "Raid full (15/15), Auto-LFG disabled.")
+		end
+		if db.autoInviteWhisper then
+			db.autoInviteWhisper = false
+			print(PREFIX .. "Raid full (15/15), AutoInviteWhisper disabled.")
 		end
 		UpdateAutoButtons()
 	else
@@ -3097,21 +3115,66 @@ function RefreshMTButtons()
 end
 RefreshMTButtons()
 
-local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-chLabel:SetPoint("TOPLEFT", 16, -376)
-chLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
-chLabel:SetText("LFM channels (click to change, 0 = none):")
+local function BuildChannelButtons()
+	local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	chLabel:SetPoint("TOPLEFT", 16, -376)
+	chLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
+	chLabel:SetText("LFM channels (click to change, 0 = none):")
 
-local chButtons = {}
-for i = 1, 3 do
-	local b = CreateMSLButton(f, tostring(db.channels[i] or 0), 38, 24)
-	b:SetPoint("TOPLEFT", 240 + (i - 1) * 44, -390)
-	b:SetScript("OnClick", function(self)
-		db.channels[i] = ((db.channels[i] or 0) + 1) % 11
-		self:SetText(tostring(db.channels[i]))
-	end)
-	chButtons[i] = b
+	local function GetJoinedChannelList()
+		local list = {}
+		for i = 1, 50 do
+			local num, name = GetChannelName(i)
+			if num and name then
+				list[#list + 1] = num
+			end
+		end
+		return list
+	end
+
+	MigrateChannelNames = function()
+		for i = 1, 3 do
+			local c = db.channels[i]
+			if type(c) == "string" then
+				db.channels[i] = ChannelNumberFromName(c)
+			end
+		end
+		for i, b in ipairs(chButtons) do
+			if b then
+				b:SetText(tostring(db.channels[i] or 0))
+			end
+		end
+	end
+
+	chButtons = {}
+	for i = 1, 3 do
+		local b = CreateMSLButton(f, tostring(db.channels[i] or 0), 70, 24)
+		b:SetPoint("TOPLEFT", 240 + (i - 1) * 78, -390)
+		b:SetScript("OnClick", function(self)
+			local joined = GetJoinedChannelList()
+			local cur = db.channels[i] or 0
+			local pos = 0
+			for j, num in ipairs(joined) do
+				if num == cur then
+					pos = j
+					break
+				end
+			end
+			local next
+			if pos == 0 then
+				next = joined[1] or 0
+			elseif pos >= #joined then
+				next = 0
+			else
+				next = joined[pos + 1]
+			end
+			db.channels[i] = next
+			self:SetText(tostring(next))
+		end)
+		chButtons[i] = b
+	end
 end
+BuildChannelButtons()
 
 local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 hint:SetPoint("BOTTOMLEFT", 16, 8)
@@ -3158,21 +3221,20 @@ local function CreateListToggle(bar)
 	b:GetPushedTexture():SetVertexColor(0.06, 0.08, 0.12, 1)
 	b:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
 	b:GetHighlightTexture():SetVertexColor(0.22, 0.3, 0.42, 1)
-	local arrow = b:CreateTexture(nil, "OVERLAY")
-	arrow:SetSize(14, 14)
+	local arrow = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	arrow:SetPoint("CENTER")
+	arrow:SetText("+")
+	arrow:SetTextColor(0.85, 0.9, 1, 1)
 	b.arrow = arrow
 	return b
 end
 
 local candBar, candHeader = CreateListHeader(PANEL_LEFT, PANEL_MID - PANEL_LEFT, "Candidates (whispers)")
 local invBar, invHeader = CreateListHeader(PANEL_MID + 4, PANEL_RIGHT - (PANEL_MID + 4), "Invited")
-local candToggle = CreateListToggle(candBar)
-local invToggle = CreateListToggle(invBar)
+local listToggle = CreateListToggle(invBar)
 
 local function SetListArrow(btn, expanded)
-	btn.arrow:SetTexture(expanded and "Interface\\Buttons\\ArrowDown" or "Interface\\Buttons\\ArrowRight")
-	btn.arrow:SetVertexColor(0.85, 0.9, 1, 1)
+	btn.arrow:SetText(expanded and "-" or "+")
 end
 
 local function UpdateListPanelHeight()
@@ -3196,27 +3258,20 @@ local function UpdateListPanelHeight()
 	end
 end
 
-local function SetCandCollapsed(collapsed)
+local function SetListsCollapsed(collapsed)
 	db.candCollapsed = collapsed
+	db.invCollapsed = collapsed
 	candScroll:SetShown(not collapsed)
+	invScroll:SetShown(not collapsed)
 	for _, r in ipairs(candRows) do
 		r:SetShown(not collapsed)
 	end
-	SetListArrow(candToggle, not collapsed)
-	if not collapsed then
-		RefreshCandidates()
-	end
-	UpdateListPanelHeight()
-end
-
-local function SetInvCollapsed(collapsed)
-	db.invCollapsed = collapsed
-	invScroll:SetShown(not collapsed)
 	for _, r in ipairs(invRows) do
 		r:SetShown(not collapsed)
 	end
-	SetListArrow(invToggle, not collapsed)
+	SetListArrow(listToggle, not collapsed)
 	if not collapsed then
+		RefreshCandidates()
 		RefreshInvited()
 	end
 	UpdateListPanelHeight()
@@ -3269,115 +3324,114 @@ for i = 1, ROWS_INV do
 	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 334, LIST_TOP - (i - 1) * ROW_HEIGHT)
 end
 
-candToggle:SetScript("OnClick", function()
-	SetCandCollapsed(not db.candCollapsed)
-end)
-invToggle:SetScript("OnClick", function()
-	SetInvCollapsed(not db.invCollapsed)
+listToggle:SetScript("OnClick", function()
+	SetListsCollapsed(not db.candCollapsed)
 end)
 
-SetCandCollapsed(db.candCollapsed)
-SetInvCollapsed(db.invCollapsed)
+SetListsCollapsed(db.candCollapsed and db.invCollapsed)
 end
 BuildListPanels()
 
-local LEECH_PANEL_WIDTH = 300
-local LEECH_ROW_HEIGHT = 24
-local LEECH_MAX_ROWS = 8
+local function BuildFlagPanel()
+	LEECH_PANEL_WIDTH = 300
+	LEECH_ROW_HEIGHT = 24
+	LEECH_MAX_ROWS = 8
 
-flagPanel = CreateFrame("Frame", "MSL201bFlagPanel", UIParent)
-flagPanel:SetSize(LEECH_PANEL_WIDTH, 28 + LEECH_ROW_HEIGHT * LEECH_MAX_ROWS + 36)
-flagPanel:SetFrameStrata("DIALOG")
-flagPanel:SetBackdrop({
-	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-	edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-	tile = true,
-	tileSize = 16,
-	edgeSize = 16,
-	insets = { left = 4, right = 4, top = 4, bottom = 4 },
-})
-flagPanel:SetBackdropColor(THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
-flagPanel:SetBackdropBorderColor(0.8, 0.2, 0.2, 0.9)
-flagPanel:SetPoint("CENTER", UIParent, "CENTER", 250, 0)
-flagPanel:SetClampedToScreen(true)
-flagPanel:EnableMouse(true)
-flagPanel:SetMovable(true)
-flagPanel:RegisterForDrag("LeftButton")
-flagPanel:SetScript("OnDragStart", function(self) self:StartMoving() end)
-flagPanel:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
+	flagPanel = CreateFrame("Frame", "MSL201bFlagPanel", UIParent)
+	flagPanel:SetSize(LEECH_PANEL_WIDTH, 28 + LEECH_ROW_HEIGHT * LEECH_MAX_ROWS + 36)
+	flagPanel:SetFrameStrata("DIALOG")
+	flagPanel:SetBackdrop({
+		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		tile = true,
+		tileSize = 16,
+		edgeSize = 16,
+		insets = { left = 4, right = 4, top = 4, bottom = 4 },
+	})
+	flagPanel:SetBackdropColor(THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
+	flagPanel:SetBackdropBorderColor(0.8, 0.2, 0.2, 0.9)
+	flagPanel:SetPoint("CENTER", UIParent, "CENTER", 250, 0)
+	flagPanel:SetClampedToScreen(true)
+	flagPanel:EnableMouse(true)
+	flagPanel:SetMovable(true)
+	flagPanel:RegisterForDrag("LeftButton")
+	flagPanel:SetScript("OnDragStart", function(self) self:StartMoving() end)
+	flagPanel:SetScript("OnDragStop", function(self) self:StopMovingOrSizing() end)
 
-local flagHeaderBar = flagPanel:CreateTexture(nil, "BACKGROUND")
-flagHeaderBar:SetTexture("Interface\\Buttons\\WHITE8X8")
-flagHeaderBar:SetVertexColor(0.15, 0.05, 0.05, 1)
-flagHeaderBar:SetPoint("TOPLEFT", 1, -1)
-flagHeaderBar:SetPoint("TOPRIGHT", -1, -1)
-flagHeaderBar:SetHeight(28)
+	local flagHeaderBar = flagPanel:CreateTexture(nil, "BACKGROUND")
+	flagHeaderBar:SetTexture("Interface\\Buttons\\WHITE8X8")
+	flagHeaderBar:SetVertexColor(0.15, 0.05, 0.05, 1)
+	flagHeaderBar:SetPoint("TOPLEFT", 1, -1)
+	flagHeaderBar:SetPoint("TOPRIGHT", -1, -1)
+	flagHeaderBar:SetHeight(28)
 
-local flagTitle = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-flagTitle:SetPoint("TOPLEFT", 10, -8)
-flagTitle:SetText("|cffff4444⚠ Leech / Lvl 59+ Warnings|r")
+	local flagTitle = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+	flagTitle:SetPoint("TOPLEFT", 10, -8)
+	flagTitle:SetText("|cffff4444⚠ Leech / Lvl 59+ Warnings|r")
 
-local flagClose = CreateFrame("Button", nil, flagPanel, "UIPanelCloseButton")
-flagClose:SetPoint("TOPRIGHT", -2, -2)
-flagClose:SetScript("OnClick", function() flagPanel:Hide() end)
+	local flagClose = CreateFrame("Button", nil, flagPanel, "UIPanelCloseButton")
+	flagClose:SetPoint("TOPRIGHT", -2, -2)
+	flagClose:SetScript("OnClick", function() flagPanel:Hide() end)
 
-flagScroll = CreateFrame("ScrollFrame", "MSL201bFlagScroll", flagPanel, "FauxScrollFrameTemplate")
-flagScroll:SetPoint("TOPLEFT", 6, -30)
-flagScroll:SetPoint("TOPRIGHT", flagPanel, "TOPRIGHT", -22, -30)
-flagScroll:SetHeight(LEECH_ROW_HEIGHT * LEECH_MAX_ROWS)
-flagScroll:SetScript("OnVerticalScroll", function(self, offset)
-	FauxScrollFrame_OnVerticalScroll(self, offset, LEECH_ROW_HEIGHT, RefreshFlagPanel)
-end)
-flagScroll:EnableMouseWheel(true)
-flagScroll:SetScript("OnMouseWheel", function(self, delta)
-	local sb = _G[self:GetName() .. "ScrollBar"]
-	sb:SetValue(sb:GetValue() - delta * LEECH_ROW_HEIGHT)
-end)
-
-local function CreateFlagRow(parent)
-	local row = CreateFrame("Frame", nil, parent)
-	row:SetSize(LEECH_PANEL_WIDTH - 30, LEECH_ROW_HEIGHT)
-	row.bg = row:CreateTexture(nil, "BACKGROUND")
-	row.bg:SetAllPoints(row)
-	row.bg:SetTexture(1, 1, 1, 0.05)
-	row.bg:Hide()
-	row:EnableMouse(true)
-	row:SetScript("OnEnter", function(self) self.bg:Show() end)
-	row:SetScript("OnLeave", function(self) self.bg:Hide() end)
-
-	row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.name:SetPoint("LEFT", 4, 0)
-	row.name:SetWidth(110)
-	row.name:SetJustifyH("LEFT")
-
-	row.reason = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.reason:SetPoint("LEFT", 118, 0)
-	row.reason:SetWidth(60)
-	row.reason:SetJustifyH("LEFT")
-
-	row.kick = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
-	row.kick:SetSize(52, LEECH_ROW_HEIGHT - 4)
-	row.kick:SetPoint("RIGHT", -4, 0)
-	row.kickText = row.kick:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	row.kickText:SetAllPoints(row.kick)
-	row.kickText:SetJustifyH("CENTER")
-	row.kickText:SetJustifyV("MIDDLE")
-	row.kickText:SetText("Kick")
-	row.kick:SetScript("OnClick", function(self)
-		local d = self:GetParent().data
-		if d then
-			KickFlagged(d.name)
-		end
+	flagScroll = CreateFrame("ScrollFrame", "MSL201bFlagScroll", flagPanel, "FauxScrollFrameTemplate")
+	flagScroll:SetPoint("TOPLEFT", 6, -30)
+	flagScroll:SetPoint("TOPRIGHT", flagPanel, "TOPRIGHT", -22, -30)
+	flagScroll:SetHeight(LEECH_ROW_HEIGHT * LEECH_MAX_ROWS)
+	flagScroll:SetScript("OnVerticalScroll", function(self, offset)
+		FauxScrollFrame_OnVerticalScroll(self, offset, LEECH_ROW_HEIGHT, RefreshFlagPanel)
+	end)
+	flagScroll:EnableMouseWheel(true)
+	flagScroll:SetScript("OnMouseWheel", function(self, delta)
+		local sb = _G[self:GetName() .. "ScrollBar"]
+		sb:SetValue(sb:GetValue() - delta * LEECH_ROW_HEIGHT)
 	end)
 
-	return row
-end
+	local function CreateFlagRow(parent)
+		local row = CreateFrame("Frame", nil, parent)
+		row:SetSize(LEECH_PANEL_WIDTH - 30, LEECH_ROW_HEIGHT)
+		row.bg = row:CreateTexture(nil, "BACKGROUND")
+		row.bg:SetAllPoints(row)
+		row.bg:SetTexture(1, 1, 1, 0.05)
+		row.bg:Hide()
+		row:EnableMouse(true)
+		row:SetScript("OnEnter", function(self) self.bg:Show() end)
+		row:SetScript("OnLeave", function(self) self.bg:Hide() end)
 
-flagRows = {}
-for i = 1, LEECH_MAX_ROWS do
-	flagRows[i] = CreateFlagRow(flagPanel)
-	flagRows[i]:SetPoint("TOPLEFT", flagPanel, "TOPLEFT", 6, -30 - (i - 1) * LEECH_ROW_HEIGHT)
+		row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.name:SetPoint("LEFT", 4, 0)
+		row.name:SetWidth(110)
+		row.name:SetJustifyH("LEFT")
+
+		row.reason = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.reason:SetPoint("LEFT", 118, 0)
+		row.reason:SetWidth(60)
+		row.reason:SetJustifyH("LEFT")
+
+		row.kick = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
+		row.kick:SetSize(52, LEECH_ROW_HEIGHT - 4)
+		row.kick:SetPoint("RIGHT", -4, 0)
+		row.kickText = row.kick:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+		row.kickText:SetAllPoints(row.kick)
+		row.kickText:SetJustifyH("CENTER")
+		row.kickText:SetJustifyV("MIDDLE")
+		row.kickText:SetText("Kick")
+		row.kick:SetScript("OnClick", function(self)
+			local d = self:GetParent().data
+			if d then
+				KickFlagged(d.name)
+			end
+		end)
+
+		return row
+	end
+
+	flagRows = {}
+	for i = 1, LEECH_MAX_ROWS do
+		flagRows[i] = CreateFlagRow(flagPanel)
+		flagRows[i]:SetPoint("TOPLEFT", flagPanel, "TOPLEFT", 6, -30 - (i - 1) * LEECH_ROW_HEIGHT)
+	end
 end
+BuildFlagPanel()
 
 function RefreshFlagPanel()
 	local list = {}
@@ -3451,7 +3505,7 @@ mm:RegisterForDrag("LeftButton")
 mm:SetClampedToScreen(true)
 
 local mmIcon = mm:CreateTexture(nil, "ARTWORK")
-mmIcon:SetTexture("Interface\\Icons\\spell_holy_guardianspirit")
+mmIcon:SetTexture("Interface\\Icons\\INV_Misc_GroupNeedMore")
 mmIcon:SetSize(26, 26)
 mmIcon:SetPoint("CENTER", mm, "CENTER", 0, -1)
 
