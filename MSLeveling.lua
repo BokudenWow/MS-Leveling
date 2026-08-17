@@ -1,15 +1,17 @@
 local ADDON_NAME = "MSLeveling"
 local PREFIX = "|cff66b3ff[MSL]|r "
 local ADDON_LINK = "https://github.com/BokudenWow/MS-Leveling/"
-local REPLY_HELP = "Automatic message: Whisper your role and aura to sign up, e.g. 'tank aura', 'heal no aura' or 'dps'. Addon: " .. ADDON_LINK
-local REPLY_OK = "Automatic message: You are on the queue list. If there is room for your role you will be db.invited."
-local WELCOME_TANK = "Automatic message: Welcome! May your shield be as unbreakable as the walls of Ironforge and every foe kneel to your taunt."
-local WELCOME_HEAL = "Automatic message: Welcome! May the Holy Light guide your hands, and the fallen always rise again at your call."
-local WELCOME_OTHER = "Automatic message: Welcome, you have been auto-invited."
-local REJECT_AURA = "Automatic message: Sorry, the slot is reserved for DPS with an Aura right now. Thanks for your interest!"
-local REJECT_ROLE_FULL = "Automatic message: Sorry, there is no room for your role right now. Thanks for your interest!"
-local REJECT_GROUP_FULL = "Automatic message: Sorry, the group is currently full. Thanks for your interest!"
-local FAREWELL_MSG = "Automatic message: Thanks for joining the group, good luck with your rolls! If you want to join again you can grab the addon here: " .. ADDON_LINK
+local MSG = {
+	REPLY_HELP = "Automatic message: Whisper your role and aura to sign up, e.g. 'tank aura', 'heal no aura' or 'dps'. Addon: " .. ADDON_LINK,
+	REPLY_OK = "Automatic message: You are on the queue list. If there is room for your role you will be invited.",
+	WELCOME_TANK = "Automatic message: Welcome! May your shield be as unbreakable as the walls of Ironforge and every foe kneel to your taunt.",
+	WELCOME_HEAL = "Automatic message: Welcome! May the Holy Light guide your hands, and the fallen always rise again at your call.",
+	WELCOME_OTHER = "Automatic message: Welcome, you have been auto-invited.",
+	REJECT_AURA = "Automatic message: Sorry, the slot is reserved for DPS with an Aura right now. Thanks for your interest!",
+	REJECT_ROLE_FULL = "Automatic message: Sorry, there is no room for your role right now. Thanks for your interest!",
+	REJECT_GROUP_FULL = "Automatic message: Sorry, the group is currently full. Thanks for your interest!",
+	FAREWELL = "Automatic message: Thanks for joining the group, good luck with your rolls! If you want to join again you can grab the addon here: " .. ADDON_LINK,
+}
 
 MSLeveling201bDB = MSLeveling201bDB or {}
 local db = MSLeveling201bDB
@@ -56,6 +58,7 @@ db.candidates = db.candidates or {}
 db.invited = db.invited or {}
 db.memberReplies = db.memberReplies or {}
 db.flaggedPlayers = db.flaggedPlayers or {}
+db.blocked60 = db.blocked60 or {}
 if db.collecting == nil then
 	db.collecting = false
 end
@@ -91,6 +94,10 @@ local chips
 
 local f, counts, selfRow, selfRoleText, selfAuraText, candScroll, candRows, invScroll, invRows, finishBtn, title
 local FindInvited, HandleWhisper, RefreshStatus, RefreshSelf, PositionMinimap, HandleRaidChat, CleanLeavers, SortGroups, HandleChannel, KickPlayer, CheckRaidLevels, SendFarewell, FrameToggleRequest, CheckDepartures, CheckAutoOff, UpdateAutoButtons, RemoveInvited, ApplyFrameToggle, RefreshAll, SyncRaidRoster, chButtons, MigrateChannelNames
+local After = nil
+local fastLevelPoll = false
+local WarnWipeForLevel60 = nil
+local GetManastormEnterState = nil
 
 local collecting = db.collecting
 local memberReplies = db.memberReplies
@@ -102,11 +109,16 @@ end
 -- Leecher / level-59 warnings panel: { name = { reason = "...", since = time } }
 local flaggedPlayers = db.flaggedPlayers
 local flagPanel, flagScroll, flagRows = nil, nil, {}
+local pendingLevel60Kicks = {}
+local warningSeen = {}
+local kick60Button, UpdateKickButton, PositionKickButton
 
-local FLAG_IDLE = "Idle 45s+ (no damage/healing)"
-local FLAG_LEECH = "Loading without contributing"
-local FLAG_LVL59 = "Reached level 59"
-local FLAG_LVL60 = "Reached level 60"
+local FLAG = {
+	IDLE = "Idle 45s+ (no damage/healing)",
+	LEECH = "Loading without contributing",
+	LVL59 = "Reached level 59",
+	LVL60 = "Reached level 60",
+}
 
 local function FlagPlayer(name, reason)
 	if not name or name == "" then return end
@@ -115,6 +127,9 @@ local function FlagPlayer(name, reason)
 	local existing = flaggedPlayers[name]
 	if existing and existing.reason == reason then return end
 	flaggedPlayers[name] = { reason = reason, since = GetTime() }
+	if flagPanel then
+		flagPanel:Show()
+	end
 	if RefreshFlagPanel then RefreshFlagPanel() end
 end
 
@@ -124,6 +139,79 @@ local function UnflagPlayer(name)
 		flaggedPlayers[name] = nil
 		if RefreshFlagPanel then RefreshFlagPanel() end
 	end
+end
+
+local function VerifiedLevel(unit, rosterLevel)
+	local unitLevel = unit and UnitLevel(unit) or nil
+	unitLevel = tonumber(unitLevel)
+	rosterLevel = tonumber(rosterLevel)
+	if unitLevel and unitLevel > 0 and rosterLevel and rosterLevel > 0 then
+		return math.min(unitLevel, rosterLevel)
+	end
+	if unitLevel and unitLevel > 0 then return unitLevel end
+	if rosterLevel and rosterLevel > 0 then return rosterLevel end
+	return nil
+end
+
+local function LiveGroupedLevel(name)
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n and n:gsub("%-.*", "") == name then
+			local _, _, _, rosterLevel = GetRaidRosterInfo(i)
+			local lvl = VerifiedLevel("raid" .. i, rosterLevel)
+			return lvl, n
+		end
+	end
+	return nil, nil
+end
+
+local function CurrentLevel60Members()
+	local players = {}
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n then
+			n = n:gsub("%-.*", "")
+			local pname = (UnitName("player") or ""):gsub("%-.*", "")
+			if n ~= pname then
+				local _, _, _, rosterLevel = GetRaidRosterInfo(i)
+				local lvl = VerifiedLevel("raid" .. i, rosterLevel)
+				if lvl and lvl >= 60 then
+					players[#players + 1] = n
+				end
+			end
+		end
+	end
+	return players
+end
+
+local function RememberLevel60(name)
+	if not name then return end
+	db.blocked60[name] = { at = time() }
+end
+
+local function ClearLevel60Record(name)
+	if not name then return end
+	db.blocked60[name] = nil
+	for pendingName in pairs(pendingLevel60Kicks) do
+		if pendingName == name then
+			pendingLevel60Kicks[pendingName] = nil
+		end
+	end
+	warningSeen[name .. ":60"] = nil
+end
+
+local function IsBlocked60(name)
+	local now = time()
+	for blockedName, record in pairs(db.blocked60) do
+		if type(record) == "table" and record.at and now - record.at <= 7200 then
+			if blockedName == name then
+				return true
+			end
+		elseif type(record) ~= "table" then
+			db.blocked60[blockedName] = nil
+		end
+	end
+	return false
 end
 
 function KickFlagged(name)
@@ -165,6 +253,7 @@ addon:RegisterEvent("READY_CHECK")
 addon:RegisterEvent("READY_CHECK_CONFIRM")
 addon:RegisterEvent("PLAYER_LEVEL_UP")
 addon:RegisterEvent("UNIT_LEVEL")
+pcall(addon.RegisterEvent, addon, "ACTIVE_MANASTORM_UPDATED")
 addon:SetScript("OnEvent", function(self, event, ...)
 	if event == "CHAT_MSG_WHISPER" then
 		if HandleWhisper then
@@ -208,11 +297,18 @@ addon:SetScript("OnEvent", function(self, event, ...)
 			ApplyRaidIcons()
 		end
 	elseif event == "UNIT_LEVEL" or event == "PLAYER_LEVEL_UP" then
-		if RefreshStatus then
-			RefreshStatus()
+		local unitRelevant = event == "PLAYER_LEVEL_UP"
+		if not unitRelevant then
+			local unit = select(1, ...)
+			unitRelevant = not unit or unit == "player" or unit:match("^party%d+$") or unit:match("^raid%d+$") or false
 		end
-		if CheckRaidLevels then
-			CheckRaidLevels()
+		if unitRelevant then
+			if RefreshStatus then
+				RefreshStatus()
+			end
+			if CheckRaidLevels then
+				CheckRaidLevels()
+			end
 		end
 	elseif event == "PLAYER_REGEN_ENABLED" then
 		if ApplyFrameToggle then
@@ -227,6 +323,10 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		if FlushPendingKicks then
 			FlushPendingKicks()
 		end
+		for name in pairs(pendingLevel60Kicks) do
+			AttemptLevel60Kick(name)
+		end
+		UpdateKickButton()
 	elseif event == "PLAYER_LOGIN" then
 		if MigrateChannelNames then
 			MigrateChannelNames()
@@ -253,9 +353,20 @@ addon:SetScript("OnEvent", function(self, event, ...)
 		if CheckManastormEntry then
 			CheckManastormEntry()
 		end
+		if CheckRaidLevels then
+			CheckRaidLevels()
+		end
 	elseif event == "READY_CHECK" or event == "READY_CHECK_CONFIRM" then
 		if HandleReadyCheck then
 			HandleReadyCheck(event, ...)
+		end
+	elseif event == "ACTIVE_MANASTORM_UPDATED" then
+		local _, newLevel = ...
+		newLevel = tonumber(newLevel)
+		if newLevel and newLevel > 0 then
+			if WarnWipeForLevel60 then
+				WarnWipeForLevel60(newLevel)
+			end
 		end
 	end
 end)
@@ -263,35 +374,32 @@ end)
 sortTickFrame = CreateFrame("Frame", "MSL201bSortTick")
 
 local function HasWord(m, w)
-	if not m:find(w, 1, true) then
-		return false
-	end
-	if m == w then
-		return true
-	end
-	if m:find("%A" .. w .. "%A") then
-		return true
-	end
-	if m:find("^" .. w .. "%A") then
-		return true
-	end
-	if m:find("%A" .. w .. "$") then
-		return true
-	end
-	if #w >= 3 then
-		return true
+	local pos = 1
+	while true do
+		local s, e = m:find(w, pos, true)
+		if not s then
+			return false
+		end
+		local prev = s > 1 and m:sub(s - 1, s - 1) or ""
+		local nextChar = m:sub(e + 1, e + 1)
+		local prevOk = prev == "" or prev:match("%A")
+		local nextOk = nextChar == "" or nextChar:match("%A")
+		if prevOk and nextOk then
+			return true
+		end
+		pos = e + 1
 	end
 	return false
 end
 
 local function DetectRole(m)
-	if HasWord(m, "tank") or HasWord(m, "tanque") or HasWord(m, "tanq") then
+	if HasWord(m, "tank") or HasWord(m, "tanks") then
 		return "Tank"
 	end
-	if HasWord(m, "heal") or HasWord(m, "healer") or HasWord(m, "sanador") or HasWord(m, "cura") or HasWord(m, "curar") or HasWord(m, "curacion") then
+	if HasWord(m, "heal") or HasWord(m, "healer") or HasWord(m, "heals") then
 		return "Heal"
 	end
-	if HasWord(m, "dps") or HasWord(m, "dd") or HasWord(m, "dano") then
+	if HasWord(m, "dps") or HasWord(m, "dd") or HasWord(m, "dds") then
 		return "DPS"
 	end
 	return nil
@@ -302,10 +410,6 @@ local AURA_NEG_PHRASES = {
 	" no auras ",
 	" noaura ",
 	" noauras ",
-	" sinaura ",
-	" sinauras ",
-	" sin aura",
-	" sin auras",
 	" without aura ",
 	" without an aura ",
 	" not aura ",
@@ -314,17 +418,11 @@ local AURA_NEG_PHRASES = {
 	" do not have an aura ",
 	" dont have aura ",
 	" dont have an aura ",
-	" no tengo aura",
-	" no tengo auras",
-	" no tengo",
-	" no curacion",
 	" no healing",
 	" aura no",
 	" auras no",
 	" no buff",
 	" nobuff ",
-	" sinbuff ",
-	" sin buff",
 	" no aura buff",
 	" would not",
 	" wout aura ",
@@ -347,7 +445,7 @@ local function DetectAura(m)
 	if MessageDeniesAura(m) then
 		return false
 	end
-	local positive = HasWord(m, "con aura") or HasWord(m, "with aura") or HasWord(m, "si aura") or HasWord(m, "with buff") or HasWord(m, "con buff") or HasWord(m, "aura si") or HasWord(m, "aura buff")
+	local positive = HasWord(m, "with aura") or HasWord(m, "with buff") or HasWord(m, "aura buff") or HasWord(m, "buff aura") or HasWord(m, "has aura") or HasWord(m, "has buff")
 	if positive then
 		return true
 	end
@@ -355,7 +453,7 @@ local function DetectAura(m)
 	if not mentions then
 		return nil
 	end
-	local neg = HasWord(m, "no") or HasWord(m, "sin") or HasWord(m, "without") or HasWord(m, "wout") or HasWord(m, "w/o")
+	local neg = HasWord(m, "no") or HasWord(m, "without") or HasWord(m, "wout") or HasWord(m, "w/o")
 	if neg then
 		return false
 	end
@@ -465,6 +563,41 @@ function FindInvited(name)
 			return v
 		end
 	end
+end
+
+-- Returns true when there is a free slot for this role/aura combo right now,
+-- mirroring the invite-capacity logic (tank/heal caps, DPS aura-reserve spots).
+local function HasSlot(role, aura)
+	local t, h, d, a, tot = GetCounts()
+	if tot >= MAX_TOTAL then
+		return false, MSG.REJECT_GROUP_FULL
+	end
+	if role == "Tank" then
+		if t >= MAX_TANK and not (aura == true and d == MAX_DPS - 1) then return false, MSG.REJECT_ROLE_FULL end
+		return true
+	elseif role == "Heal" then
+		if h >= MAX_HEAL and not (aura == true and d == MAX_DPS - 1) then return false, MSG.REJECT_ROLE_FULL end
+		return true
+	elseif role == "DPS" then
+		local missing = math.max(0, MAX_AURA - a)
+		local auraReserve = missing + 1
+		if auraReserve < MAX_AURA then
+			auraReserve = MAX_AURA
+		end
+		if aura == true then
+			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
+			if d >= MAX_DPS then
+				return false, MSG.REJECT_ROLE_FULL
+			end
+		else
+			if d >= (MAX_DPS - auraReserve) then
+				return false, (a < MAX_AURA and MSG.REJECT_AURA or MSG.REJECT_ROLE_FULL)
+			end
+		end
+		return true
+	end
+	-- Unclear role: don't discard, let the leader assign the slot later.
+	return true
 end
 
 local function RefreshCandidates()
@@ -603,14 +736,11 @@ RefreshAll = function()
 	RefreshCounts()
 	RefreshCandidates()
 	RefreshInvited()
-	if RefreshCompLabels then
-		RefreshCompLabels()
-	end
 	if finishBtn then
 		finishBtn:SetEnabled(collecting)
 	end
-	if title then
-		title:SetText("|cff66b3ffMS Leveling 2.04|r" .. (collecting and " |cff7dff7d[Collecting...]|r" or ""))
+if title then
+		title:SetText("|cff66b3ffMS Leveling 2.05|r" .. (collecting and " |cff7d7ffd[Collecting...]|r" or ""))
 	end
 end
 
@@ -667,14 +797,20 @@ local function InvitePlayer(name)
 end
 
 local function TryAutoInvite(name, fromChannel)
+	if IsBlocked60(name) then
+		if not fromChannel then
+			pcall(SendChatMessage, "Automatic message: You are blocked from this group. Sorry!", "WHISPER", nil, name)
+		end
+		return false
+	end
 	local _, cand = FindCandidate(name)
 	if not cand then
 		return false
 	end
-	local t, h, d, a, tot = GetCounts()
-if tot >= MAX_TOTAL then
+	local _, _, _, a, tot = GetCounts()
+	if tot >= MAX_TOTAL then
 		if not fromChannel then
-			pcall(SendChatMessage, REJECT_GROUP_FULL, "WHISPER", nil, name)
+			pcall(SendChatMessage, MSG.REJECT_GROUP_FULL, "WHISPER", nil, name)
 		end
 		return false
 	end
@@ -688,44 +824,14 @@ if tot >= MAX_TOTAL then
 		end
 		return false
 	end
-	local role = cand.role
-	local rejected = false
-	local rejectAura = false
-	local auraLastDps = cand.aura == true and d == MAX_DPS - 1
-	if role == "Tank" then
-		rejected = t >= MAX_TANK and not auraLastDps
-	elseif role == "Heal" then
-		rejected = h >= MAX_HEAL and not auraLastDps
-	elseif role == "DPS" then
-		-- DPS without an aura may fill up to the base limit (7 = MAX_DPS - MAX_AURA).
-		-- When auras are missing we reserve even more slots for DPS with an Aura:
-		-- e.g. 2 auras missing -> 3 slots reserved, 3 auras missing -> 4 slots reserved.
-		local missing = math.max(0, MAX_AURA - a)
-		local auraReserve = missing + 1
-		if auraReserve < MAX_AURA then
-			auraReserve = MAX_AURA
-		end
-		if cand.aura == true then
-			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
-			rejected = d >= MAX_DPS
-		else
-			rejected = d >= (MAX_DPS - auraReserve)
-			rejectAura = rejected and a < MAX_AURA
-		end
-	else
-		return false
-	end
-	if rejected then
+	local has, rejectReason = HasSlot(cand.role, cand.aura)
+	if not has then
 		if not fromChannel then
-			if rejectAura then
-				pcall(SendChatMessage, REJECT_AURA, "WHISPER", nil, name)
-			else
-				pcall(SendChatMessage, REJECT_ROLE_FULL, "WHISPER", nil, name)
-			end
+			pcall(SendChatMessage, rejectReason, "WHISPER", nil, name)
 		end
 		return false
 	end
-	print(PREFIX .. "Room available for " .. name .. " (" .. role .. "), auto-inviting.")
+	print(PREFIX .. "Room available for " .. name .. " (" .. cand.role .. "), auto-inviting.")
 	InvitePlayer(name)
 	return true
 end
@@ -898,10 +1004,10 @@ local function BroadcastLFM()
 	local channelNames = {}
 	local joined = {}
 	for i = 1, 50 do
-		local num, name = GetChannelName(i)
+		local name = GetChannelName(i)
 		if name then
-			channelNames[num] = name
-			table.insert(joined, name .. " (" .. num .. ")")
+			channelNames[i] = name
+			table.insert(joined, name .. " (" .. i .. ")")
 		end
 	end
 	for i = 1, 3 do
@@ -929,7 +1035,7 @@ function RefreshStatus()
 	local names = {}
 	local pname = UnitName("player")
 	if pname then
-		names[pname] = true
+		names[pname:gsub("%-.*", "")] = true
 	end
 	for i = 1, GetNumPartyMembers() do
 		local n = UnitName("party" .. i)
@@ -957,6 +1063,7 @@ function RefreshStatus()
 		local inv = db.invited[i]
 		if inv.status == "Joined" and not names[inv.name] then
 			print(PREFIX .. inv.name .. " left the raid, removed from the invited list.")
+			SendFarewell(inv.name, "Thank you for participating!")
 			table.remove(db.invited, i)
 			changed = true
 		end
@@ -970,11 +1077,11 @@ function RefreshStatus()
 				inv.welcomed = true
 				local welcome
 				if inv.role == "Tank" then
-					welcome = WELCOME_TANK
+					welcome = MSG.WELCOME_TANK
 				elseif inv.role == "Heal" then
-					welcome = WELCOME_HEAL
+					welcome = MSG.WELCOME_HEAL
 				else
-					welcome = WELCOME_OTHER
+					welcome = MSG.WELCOME_OTHER
 				end
 				pcall(SendChatMessage, welcome, "WHISPER", nil, inv.name)
 			end
@@ -1023,6 +1130,7 @@ function CleanLeavers(silent)
 		local inv = db.invited[i]
 		if not names[inv.name] then
 			print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
+			SendFarewell(inv.name, "Thank you for participating!")
 			table.remove(db.invited, i)
 			removed = removed + 1
 		end
@@ -1286,7 +1394,6 @@ function SortGroups()
 			end
 		end
 	end
-	local moved, failed = 0, 0
 	local blocked = nil
 	local function capture(err)
 		if not blocked and err then
@@ -1323,13 +1430,6 @@ function SortGroups()
 			end
 		end
 		return false
-	end
-	local function findHolding()
-		for g = groups + 1, 8 do
-			if countIn(g) < 5 then
-				return g
-			end
-		end
 	end
 	local function tryPlace(n)
 		local t = groupOf[n]
@@ -1511,41 +1611,6 @@ local function UpsertCandidate(name, role, aura)
 	end
 end
 
--- Returns true when there is a free slot for this role/aura combo right now,
--- mirroring the invite-capacity logic (tank/heal caps, DPS aura-reserve spots).
-local function HasSlot(role, aura)
-	local t, h, d, a, tot = GetCounts()
-	if tot >= MAX_TOTAL then
-		return false, REJECT_GROUP_FULL
-	end
-	if role == "Tank" then
-		if t >= MAX_TANK and not (aura == true and d == MAX_DPS - 1) then return false, REJECT_ROLE_FULL end
-		return true
-	elseif role == "Heal" then
-		if h >= MAX_HEAL and not (aura == true and d == MAX_DPS - 1) then return false, REJECT_ROLE_FULL end
-		return true
-	elseif role == "DPS" then
-		local missing = math.max(0, MAX_AURA - a)
-		local auraReserve = missing + 1
-		if auraReserve < MAX_AURA then
-			auraReserve = MAX_AURA
-		end
-		if aura == true then
-			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
-			if d >= MAX_DPS then
-				return false, REJECT_ROLE_FULL
-			end
-		else
-			if d >= (MAX_DPS - auraReserve) then
-				return false, (a < MAX_AURA and REJECT_AURA or REJECT_ROLE_FULL)
-			end
-		end
-		return true
-	end
-	-- Unclear role: don't discard, let the leader assign the slot later.
-	return true
-end
-
 function HandleWhisper(msg, author)
 	msg = msg or ""
 	author = author or "?"
@@ -1568,7 +1633,7 @@ function HandleWhisper(msg, author)
 			local rep = memberReplies[name]
 			print(PREFIX .. name .. " replied (" .. rep.role .. (rep.aura and " - Aura" or " - Without aura") .. ")")
 			if db.autoReply then
-				SendChatMessage(REPLY_OK, "WHISPER", nil, name)
+				SendChatMessage(MSG.REPLY_OK, "WHISPER", nil, name)
 			end
 		end
 		return
@@ -1584,7 +1649,7 @@ function HandleWhisper(msg, author)
 		print(PREFIX .. name .. " updated (" .. inv.role .. " - " .. (inv.aura == nil and "?" or (inv.aura and "Aura" or "No")) .. ")")
 		RefreshAll()
 		if db.autoReply and (role or aura ~= nil) then
-			SendChatMessage(REPLY_OK, "WHISPER", nil, name)
+			SendChatMessage(MSG.REPLY_OK, "WHISPER", nil, name)
 		end
 		return
 	end
@@ -1610,9 +1675,9 @@ function HandleWhisper(msg, author)
 				pcall(SendChatMessage, rejectReason, "WHISPER", nil, name)
 			end
 		elseif not invitedNow and (role or aura ~= nil) then
-			SendChatMessage(REPLY_OK, "WHISPER", nil, name)
+			SendChatMessage(MSG.REPLY_OK, "WHISPER", nil, name)
 		elseif not invitedNow then
-			SendChatMessage(REPLY_HELP, "WHISPER", nil, name)
+			SendChatMessage(MSG.REPLY_HELP, "WHISPER", nil, name)
 		end
 	end
 end
@@ -1628,11 +1693,11 @@ local function ChannelNumberFromName(channelName)
 	local base = tostring(channelName or ""):gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
 	if base ~= "" then
 		for i = 1, 50 do
-			local num, name = GetChannelName(i)
+			local name = GetChannelName(i)
 			if name then
 				local cleanName = name:gsub("^%d+%.?", ""):gsub("^%s*", ""):gsub("%s*$", ""):lower()
 				if cleanName == base then
-					return num
+					return i
 				end
 			end
 		end
@@ -1765,9 +1830,9 @@ SendFarewell = function(name, reason, full)
 	if full then
 		msg = full
 	elseif reason then
-		msg = reason .. " " .. FAREWELL_MSG
+		msg = reason .. " " .. MSG.FAREWELL
 	else
-		msg = FAREWELL_MSG
+		msg = MSG.FAREWELL
 	end
 	local ok = pcall(SendChatMessage, msg, "WHISPER", nil, name)
 	if not ok then
@@ -1783,6 +1848,7 @@ function DoKickPlayer(name, reason)
 		RemoveInvited(name)
 		SendFarewell(name, reason or "You have been removed from the raid.")
 		print(PREFIX .. "Kicked " .. name .. " from the raid.")
+		pendingLevel60Kicks[name] = nil
 	else
 		print(PREFIX .. "Could not kick " .. name .. " (protected action, kick manually).")
 	end
@@ -1804,12 +1870,115 @@ function FlushPendingKicks()
 	end
 end
 
+local function HasAutomationAuthority()
+	if not IsInRaid() and not IsInGroup() then
+		return true
+	end
+	return IsRaidLeader() or IsRaidOfficer()
+end
+
+local function AttemptLevel60Kick(name)
+	if not HasAutomationAuthority() or not name then return end
+	if pendingLevel60Kicks[name] then return end
+	pendingLevel60Kicks[name] = true
+	UpdateKickButton()
+	print(PREFIX .. "LEVEL 60: auto-kicking " .. name .. ".")
+	KickPlayer(name, FLAG.LVL60)
+end
+
+UpdateKickButton = function()
+	if not kick60Button then return end
+	local inCombat = InCombatLockdown and InCombatLockdown()
+	if not IsInRaid() or not HasAutomationAuthority() then
+		if not inCombat then kick60Button:Hide() end
+		return
+	end
+	local kickName
+	for name in pairs(pendingLevel60Kicks) do
+		local liveLevel = LiveGroupedLevel(name)
+		if liveLevel and liveLevel >= 60 then
+			kickName = name
+			break
+		else
+			pendingLevel60Kicks[name] = nil
+		end
+	end
+	if not kickName then
+		if not inCombat then kick60Button:Hide() end
+		return
+	end
+	if inCombat then return end
+	kick60Button:SetText("KICK LEVEL 60: " .. kickName)
+	kick60Button:Enable()
+	kick60Button:SetAttribute("type", "macro")
+	kick60Button:SetAttribute("macrotext", "/uninvite " .. kickName)
+	kick60Button.targetName = kickName
+	PositionKickButton()
+	kick60Button:Show()
+end
+
+PositionKickButton = function()
+	if not kick60Button or not f then return end
+	if InCombatLockdown and InCombatLockdown() then return end
+	local left = f:GetLeft()
+	local top = f:GetTop()
+	if not left or not top then return end
+	kick60Button:ClearAllPoints()
+	kick60Button:SetPoint("TOPLEFT", UIParent, "BOTTOMLEFT", left + 10, top + 30)
+end
+
+local lastWipeWarningKey = nil
+
+WarnWipeForLevel60 = function(newLevel)
+	if not HasAutomationAuthority() then return end
+	local players = CurrentLevel60Members()
+	local present = {}
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n then
+			present[n:gsub("%-.*", "")] = true
+		end
+	end
+	for name, info in pairs(flaggedPlayers) do
+		if info and (info.reason == FLAG.LVL59 or info.reason == FLAG.LVL60) and present[name] then
+			local already = false
+			for _, p in ipairs(players) do
+				if p == name then already = true; break end
+			end
+			if not already then
+				players[#players + 1] = name
+			end
+		end
+	end
+	if #players == 0 then
+		lastWipeWarningKey = nil
+		return
+	end
+	local shortNames = {}
+	for _, name in ipairs(players) do
+		table.insert(shortNames, name)
+		RememberLevel60(name)
+		AttemptLevel60Kick(name)
+	end
+	local warningKey = tostring(newLevel or "?") .. ":" .. table.concat(shortNames, ",")
+	if warningKey == lastWipeWarningKey then return end
+	lastWipeWarningKey = warningKey
+	UpdateKickButton()
+	local message = "[MSL] WIPE! LEVEL 60 ENTERED MANASTORM: " .. table.concat(shortNames, ", ") .. " - THIS LEVEL SCALED TO 60! AUTO-KICKING."
+	for i = 0, 2 do
+		local msg = message
+		After(i * 0.8, function()
+			SendChatMessage(msg, "RAID_WARNING")
+		end)
+	end
+end
+
 function CheckRaidLevels()
 	if not IsInRaid() then
 		fastLevelPoll = false
 		return false, false
 	end
-	if not IsRaidLeader() and not IsRaidOfficer() then
+	if not HasAutomationAuthority() then
 		fastLevelPoll = false
 		return false, false
 	end
@@ -1818,33 +1987,38 @@ function CheckRaidLevels()
 	local has59 = false
 	local has60 = false
 	for i = 1, GetNumRaidMembers() do
-		local n = GetRaidRosterInfo(i)
+		local n, _, _, rosterLevel = GetRaidRosterInfo(i)
 		if n then
 			n = n:gsub("%-.*", "")
 			present[n] = true
 			if n ~= pname then
-				local _, _, _, rosterLevel = GetRaidRosterInfo(i)
-				local lvl = UnitLevel and UnitLevel("raid" .. i) or rosterLevel
-				if (not lvl or lvl < 1) and rosterLevel then
-					lvl = rosterLevel
+				local lvl = VerifiedLevel("raid" .. i, rosterLevel)
+				if lvl and lvl < 60 then
+					ClearLevel60Record(n)
 				end
-			if lvl and lvl >= 59 then
-				if lvl >= 60 then
-					has60 = true
-					if not flaggedPlayers[n] or flaggedPlayers[n].reason ~= FLAG_LVL60 then
-						FlagPlayer(n, FLAG_LVL60)
-						SendChatMessage("[MSL] " .. n .. " reached LEVEL 60.", "RAID_WARNING")
+				if lvl and lvl >= 59 then
+					if lvl >= 60 then
+						has60 = true
+						local key = n .. ":60"
+						if not warningSeen[key] then
+							warningSeen[key] = true
+							RememberLevel60(n)
+							FlagPlayer(n, FLAG.LVL60)
+							SendChatMessage("[MSL] " .. n .. " reached LEVEL 60. Removing from group.", "RAID_WARNING")
+						end
+						if not pendingLevel60Kicks[n] then
+							AttemptLevel60Kick(n)
+						end
+					else
+						has59 = true
+						if not flaggedPlayers[n] or flaggedPlayers[n].reason ~= FLAG.LVL59 then
+							FlagPlayer(n, FLAG.LVL59)
+							SendChatMessage("[MSL] " .. n .. " reached LEVEL 59.", "RAID_WARNING")
+						end
 					end
 				else
-					has59 = true
-					if not flaggedPlayers[n] or flaggedPlayers[n].reason ~= FLAG_LVL59 then
-						FlagPlayer(n, FLAG_LVL59)
-						SendChatMessage("[MSL] " .. n .. " reached LEVEL 59.", "RAID_WARNING")
-					end
+					UnflagPlayer(n)
 				end
-			else
-				UnflagPlayer(n)
-			end
 			end
 		end
 	end
@@ -1852,6 +2026,7 @@ function CheckRaidLevels()
 		if not present[n] then UnflagPlayer(n) end
 	end
 	fastLevelPoll = has59
+	UpdateKickButton()
 	return has59, has60
 end
 
@@ -1859,7 +2034,7 @@ end
 
 local tickOptions = {}
 
-local function After(delay, fn)
+After = function(delay, fn)
 	tickOptions[#tickOptions + 1] = { delay = delay, elapsed = 0, fn = fn }
 end
 
@@ -1971,8 +2146,9 @@ local AFK_CHECK_INTERVAL = 20
 local AFK_WINDOW = 35
 local afkCheckAccum = 0
 local levelPollAccum = 0
-local fastLevelPoll = false
+fastLevelPoll = false
 local autoLFMAccum = 0
+local flagRefreshAccum = 0
 
 local timerFeature = CreateFrame("Frame", "MSL201bFeatureTimer")
 local dragStuckGrace = 0
@@ -2029,7 +2205,11 @@ timerFeature:SetScript("OnUpdate", function(self, dt)
 	end
 	if RefreshFlagPanel then
 	if flagPanel and flagPanel:IsShown() then
-		RefreshFlagPanel()
+		flagRefreshAccum = flagRefreshAccum + dt
+		if flagRefreshAccum >= 1 then
+			flagRefreshAccum = 0
+			RefreshFlagPanel()
+		end
 	end
 	end
 end)
@@ -2081,12 +2261,12 @@ local IDLE_FLAG_THRESHOLD = 45
 local function KickAFK(name)
 	local last = lastHit[name]
 	if not last then
-		FlagPlayer(name, FLAG_IDLE)
+		FlagPlayer(name, FLAG.IDLE)
 		return true
 	end
 	local idleSec = GetTime() - last
 	if idleSec >= IDLE_FLAG_THRESHOLD then
-		FlagPlayer(name, FLAG_IDLE)
+		FlagPlayer(name, FLAG.IDLE)
 		return true
 	else
 		UnflagPlayer(name)
@@ -2225,7 +2405,7 @@ function CheckLeechLoads()
 					leechStrikes[name] = (leechStrikes[name] or 0) + 1
 					local strikes = leechStrikes[name]
 					if strikes >= 2 then
-						FlagPlayer(name, FLAG_LEECH)
+						FlagPlayer(name, FLAG.LEECH)
 					else
 						UnflagPlayer(name)
 					end
@@ -2278,56 +2458,22 @@ function DoFeatureEnter()
 		print(PREFIX .. "You must be in a raid to enter Group Manastorm.")
 		return
 	end
-	local found = false
-	-- 1) custom configured frame name
-	local candidate = db.enterButtonName and type(db.enterButtonName) == "string" and _G[db.enterButtonName]
-	if db.enterButtonName and candidate and candidate:GetObjectType() ~= "Button" then
-		print(PREFIX .. "Configured button '" .. db.enterButtonName .. "' is not clickable.")
-	end
-	if candidate then
-		found = true
-		local ok = pcall(candidate.Click, candidate, "LeftButton")
+	local state, enterButton = GetManastormEnterState()
+	if state == "ready" and enterButton then
+		local ok = pcall(enterButton.Click, enterButton, "LeftButton")
 		if ok then
-			print(PREFIX .. "MS1 Enter pressed (" .. db.enterButtonName .. ").")
+			print(PREFIX .. "Enter Manastorm Level 1 pressed.")
 			return
 		end
-	end
-	-- 2) Ascension's own API if present
-	if type(C_Manastorm) == "table" and type(C_Manastorm.Enter) == "function" then
-		found = true
-		local ok = pcall(C_Manastorm.Enter, C_Manastorm)
-		if ok then
-			print(PREFIX .. "C_Manastorm.Enter called.")
-			return
-		end
-	end
-	-- 3) Ascension's Mana Storm panel button; open the panel first if hidden
-	local native = _G.ManastormQueueFrameRightPanelEnterButton
-	if native and native:GetObjectType() == "Button" then
-		found = true
-		local queueFrame = _G.ManastormQueueFrame
-		if queueFrame and type(queueFrame.IsShown) == "function" and not queueFrame:IsShown() and type(queueFrame.Show) == "function" then
-			pcall(queueFrame.Show, queueFrame)
-		end
-		local ok = pcall(native.Click, native, "LeftButton")
-		if ok then
-			print(PREFIX .. "Enter pressed (ManastormQueueFrameRightPanelEnterButton).")
-			return
-		end
-	end
-	-- 4) Manastormer's helper global if it is installed
-	if type(ClickManastormEnter) == "function" then
-		found = true
-		local ok = pcall(ClickManastormEnter)
-		if ok then
-			print(PREFIX .. "Enter (ClickManastormEnter) done.")
-			return
-		end
-	end
-	if found then
-		print(PREFIX .. "Could not trigger Enter Manastorm (protected while in combat?). Open Ascension's Mana Storm panel and click Enter Manastorm manually.")
+		print(PREFIX .. "Enter button click was blocked (combat?). Try again outside combat.")
+	elseif state == "level" then
+		print(PREFIX .. "Could not auto-select Level 1. Open the Mana Storm panel and select it manually.")
+	elseif state == "disabled" then
+		print(PREFIX .. "Ascension's Enter Group Manastorm button is currently disabled.")
+	elseif state == "noload" then
+		print(PREFIX .. "Ascension's Mana Storm panel is not loaded. Open it once in-game, then try again.")
 	else
-		print(PREFIX .. "No MS1 entry button found. Open Ascension's Mana Storm panel and click Enter Manastorm manually.")
+		print(PREFIX .. "Manastorm UI not found. Run /mslv api to inspect.")
 	end
 end
 
@@ -2536,6 +2682,7 @@ local function CreateRow(parent, isCandidate)
 		row.kick:SetScript("OnClick", function(self)
 			local d = self:GetParent().data
 			if d then
+				SendFarewell(d.name, "You have been removed from the group.")
 				RemoveInvited(d.name)
 			end
 		end)
@@ -2544,7 +2691,7 @@ local function CreateRow(parent, isCandidate)
 end
 
 f = CreateFrame("Frame", "MSL201bFrame", UIParent)
-f:SetSize(660, 870)
+f:SetSize(660, 840)
 f:SetPoint("CENTER")
 f:SetBackdrop({
 	bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -2591,7 +2738,7 @@ headerLine:SetHeight(1)
 
 title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
 title:SetPoint("TOPLEFT", 18, -8)
-title:SetText("|cff66b3ffMS Leveling 2.04|r")
+title:SetText("|cff66b3ffMS Leveling 2.05|r")
 
 local subtitle = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 subtitle:SetPoint("TOPLEFT", 18, -32)
@@ -2650,80 +2797,30 @@ for i, chip in ipairs(chips) do
 	chip.label:SetText(chipDefs[i])
 end
 
-local compRow = CreateFrame("Frame", nil, f)
-compRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -128)
-compRow:SetSize(620, 26)
-
-local compLabel = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-compLabel:SetPoint("LEFT", 0, 1)
-compLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
-compLabel:SetText("Comp:")
-
-local tankLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-tankLbl:SetPoint("LEFT", 52, 1)
-tankLbl:SetTextColor(0.85, 0.88, 0.95)
-tankLbl:SetText("Tank")
-
-local tankMinus = CreateMSLButton(compRow, "-", 24, 24)
-tankMinus:SetPoint("LEFT", 92, 0)
-local tankVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-tankVal:SetPoint("LEFT", 120, 0)
-tankVal:SetWidth(34)
-tankVal:SetJustifyH("CENTER")
-tankVal:SetTextColor(1.0, 0.6, 0.3)
-local tankPlus = CreateMSLButton(compRow, "+", 24, 24)
-tankPlus:SetPoint("LEFT", 158, 0)
-
-local healLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-healLbl:SetPoint("LEFT", 210, 1)
-healLbl:SetTextColor(0.85, 0.88, 0.95)
-healLbl:SetText("Heal")
-local healMinus = CreateMSLButton(compRow, "-", 24, 24)
-healMinus:SetPoint("LEFT", 250, 0)
-local healVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-healVal:SetPoint("LEFT", 278, 0)
-healVal:SetWidth(34)
-healVal:SetJustifyH("CENTER")
-healVal:SetTextColor(0.3, 1.0, 0.5)
-local healPlus = CreateMSLButton(compRow, "+", 24, 24)
-healPlus:SetPoint("LEFT", 316, 0)
-
-local dpsLbl = compRow:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-dpsLbl:SetPoint("LEFT", 372, 1)
-dpsLbl:SetTextColor(0.85, 0.88, 0.95)
-dpsLbl:SetText("DPS (auto)")
-local dpsVal = compRow:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-dpsVal:SetPoint("LEFT", 448, 0)
-dpsVal:SetWidth(44)
-dpsVal:SetJustifyH("CENTER")
-dpsVal:SetTextColor(1.0, 0.85, 0.2)
-
 local function changeComp(key, delta, lo, hi)
 	local v = math.max(lo, math.min(hi, (tonumber(db[key]) or lo) + delta))
 	if db[key] ~= v then
 		db[key] = v
 		ApplyComp()
-		RefreshCompLabels()
 		RefreshAll()
 		RefreshMTButtons()
 	end
 end
-tankMinus:SetScript("OnClick", function() changeComp("compTank", -1, 1, 3) end)
-tankPlus:SetScript("OnClick", function() changeComp("compTank", 1, 1, 3) end)
-healMinus:SetScript("OnClick", function() changeComp("compHeal", -1, 1, 5) end)
-healPlus:SetScript("OnClick", function() changeComp("compHeal", 1, 1, 5) end)
 
-RefreshCompLabels = function()
-	if tankVal then tankVal:SetText(MAX_TANK) end
-	if healVal then healVal:SetText(MAX_HEAL) end
-	if dpsVal then dpsVal:SetText(MAX_DPS) end
+for _, def in ipairs({ { chips[1], "compTank", 1, 3 }, { chips[2], "compHeal", 1, 5 } }) do
+	local chip = def[1]
+	local minus = CreateMSLButton(chip, "-", 18, 18)
+	minus:SetPoint("LEFT", chip, "LEFT", 4, 0)
+	minus:SetScript("OnClick", function() changeComp(def[2], -1, def[3], def[4]) end)
+	local plus = CreateMSLButton(chip, "+", 18, 18)
+	plus:SetPoint("RIGHT", chip, "RIGHT", -4, 0)
+	plus:SetScript("OnClick", function() changeComp(def[2], 1, def[3], def[4]) end)
 end
-RefreshCompLabels()
 
 RefreshCounts()
 
 selfRow = CreateFrame("Frame", nil, f)
-selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -296)
+selfRow:SetPoint("TOPLEFT", f, "TOPLEFT", 12, -266)
 selfRow:SetSize(620, ROW_HEIGHT)
 
 selfRow.name = selfRow:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
@@ -2761,12 +2858,12 @@ local function CreateSectionTitle(y, text)
 	return t
 end
 
-CreateSectionTitle(-158, "Form Raid")
-CreateSectionTitle(-204, "Manage raid")
-CreateSectionTitle(-250, "GO")
+CreateSectionTitle(-128, "Form Raid")
+CreateSectionTitle(-174, "Manage raid")
+CreateSectionTitle(-220, "GO")
 
 local lfmBtn = CreateMSLButton(f, "Post LFM", 96, 22)
-lfmBtn:SetPoint("TOPLEFT", 12, -176)
+lfmBtn:SetPoint("TOPLEFT", 12, -146)
 lfmBtn:SetScript("OnClick", BroadcastLFM)
 
 local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoSPAM-LFM (30s): On" or "AutoSPAM-LFM (30s): Off", 160, 22)
@@ -2802,7 +2899,7 @@ autoWhisperBtn:SetScript("OnClick", function(self)
 end)
 
 local raidBtn = CreateMSLButton(f, "Load Raid", 96, 22)
-raidBtn:SetPoint("TOPLEFT", 12, -222)
+raidBtn:SetPoint("TOPLEFT", 12, -192)
 raidBtn:SetScript("OnClick", LoadRaid)
 
 finishBtn = CreateMSLButton(f, "Finish Count", 110, 22)
@@ -2879,7 +2976,7 @@ CheckAutoOff = function()
 end
 
 local resetBtn = CreateMSLButton(f, "Reset all data", 110, 22)
-resetBtn:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", 644, -662)
+resetBtn:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", 644, -632)
 resetBtn:SetScript("OnClick", function()
 	StaticPopup_Show("MSL201B_RESET")
 end)
@@ -2976,7 +3073,47 @@ local function ManastormLevelOneSelected(dropdown)
 	return txt and tonumber(txt:match("[Ll]evel%s*(%d+)")) == 1
 end
 
-local function GetManastormEnterState()
+local function FindManastormLevelOneButton()
+	local levelList = _G.ManastormQueueFrameRightPanelLevelSelectScrollList
+	local scrollFrame = levelList and (levelList.ScrollFrame or levelList)
+	local buttons = scrollFrame and scrollFrame.buttons
+	if type(buttons) == "table" then
+		for _, button in pairs(buttons) do
+			local text = ManastormFrameText(button)
+			if text and tonumber(text:match("[Ll]evel%s+(%d+)")) == 1 and type(button.Click) == "function" then
+				return button
+			end
+		end
+	end
+	local roots = {
+		_G.ManastormQueueFrameRightPanelLevelSelect,
+		levelList,
+		scrollFrame,
+	}
+	local seen = {}
+	local function FindInChildren(frame, depth)
+		if not frame or seen[frame] or depth > 8 then return nil end
+		seen[frame] = true
+		local text = ManastormFrameText(frame)
+		if text and tonumber(text:match("[Ll]evel%s+(%d+)")) == 1 and type(frame.Click) == "function" then
+			return frame
+		end
+		if type(frame.GetChildren) == "function" then
+			for _, child in ipairs({ frame:GetChildren() }) do
+				local found = FindInChildren(child, depth + 1)
+				if found then return found end
+			end
+		end
+		return nil
+	end
+	for _, root in ipairs(roots) do
+		local found = FindInChildren(root, 0)
+		if found then return found end
+	end
+	return nil
+end
+
+GetManastormEnterState = function()
 	local queueFrame, enterButton, dropdown, uiLoaded = ResolveManastormFrames()
 	if not uiLoaded then
 		return "noload"
@@ -2988,10 +3125,16 @@ local function GetManastormEnterState()
 		if type(queueFrame.Show) == "function" then
 			pcall(queueFrame.Show, queueFrame)
 		end
-		return "opened"
 	end
 	if not ManastormLevelOneSelected(dropdown) then
-		return "level"
+		local lvl1Btn = FindManastormLevelOneButton()
+		if lvl1Btn then
+			pcall(lvl1Btn.Click, lvl1Btn, "LeftButton")
+			dropdown = dropdown or _G.ManastormQueueFrameRightPanelLevelDropDown
+		end
+		if not ManastormLevelOneSelected(dropdown) then
+			return "level"
+		end
 	end
 	if type(enterButton.IsEnabled) == "function" and not enterButton:IsEnabled() then
 		return "disabled"
@@ -3036,16 +3179,14 @@ for i, def in ipairs(featureDefs) do
 			local state, enterButton = GetManastormEnterState()
 			if state == "ready" then
 				self:SetAttribute("clickbutton", enterButton)
-			elseif state == "opened" then
-				print(PREFIX .. "Mana Storm panel opened. Select Level 1 on it, then click Enter MS 1 again.")
 			elseif state == "level" then
-				print(PREFIX .. "Select Level 1 on Ascension's Mana Storm panel first.")
+				print(PREFIX .. "Could not auto-select Level 1. Open the Mana Storm panel and select it manually.")
 			elseif state == "disabled" then
 				print(PREFIX .. "Ascension's Enter Group Manastorm button is currently disabled.")
 			elseif state == "noload" then
-				print(PREFIX .. "Ascension's Mana Storm panel is not loaded. Open it once in-game (its own button/window), then click Enter MS 1 again. Run /mslv api if it still fails.")
+				print(PREFIX .. "Ascension's Mana Storm panel is not loaded. Open it once in-game, then click Enter MS 1 again.")
 			else
-				print(PREFIX .. "Manastorm UI found but the Enter button is missing. Run /mslv api to inspect, or configure it with: /mslv enter <ButtonName>")
+				print(PREFIX .. "Manastorm UI not found. Run /mslv api to inspect.")
 			end
 		end)
 		b:SetScript("PostClick", function(self)
@@ -3056,7 +3197,7 @@ for i, def in ipairs(featureDefs) do
 	end
 	StyleMSLButton(b)
 	b:SetSize(110, 22)
-	b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -268)
+	b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -238)
 	b:SetText(def[1])
 	if def[2] ~= "EnterMS" then
 		b:SetScript("OnClick", function()
@@ -3078,8 +3219,37 @@ refreshFeatureButtons = function()
 end
 refreshFeatureButtons()
 
+kick60Button = CreateFrame("Button", nil, UIParent, "SecureActionButtonTemplate")
+kick60Button:SetWidth(260)
+kick60Button:SetHeight(28)
+kick60Button:SetPoint("CENTER", UIParent, "CENTER", 0, 200)
+kick60Button:SetFrameStrata("DIALOG")
+kick60Button:SetBackdrop({
+	bgFile = "Interface\\Buttons\\WHITE8X8",
+	edgeFile = "Interface\\Buttons\\UI-ActionButton-Border",
+	edgeSize = 14, insets = { left = 2, right = 2, top = 2, bottom = 2 },
+})
+kick60Button:SetBackdropColor(0.7, 0.1, 0.1, 0.95)
+kick60Button:SetBackdropBorderColor(0.9, 0.2, 0.2, 1)
+kick60Button:SetText("KICK LEVEL 60")
+StyleMSLButton(kick60Button)
+kick60Button:SetScript("PostClick", function(self)
+	local removedName = self.targetName
+	self:SetAttribute("type", nil)
+	self:SetAttribute("macrotext", nil)
+	After(0.1, function()
+		if removedName then
+			DoKickPlayer(removedName, FLAG.LVL60)
+		end
+		pendingLevel60Kicks[removedName] = nil
+		UpdateKickButton()
+		RefreshAll()
+	end)
+end)
+kick60Button:Hide()
+
 local mtLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-mtLabel:SetPoint("TOPLEFT", 16, -330)
+mtLabel:SetPoint("TOPLEFT", 16, -300)
 mtLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 mtLabel:SetText("Mark MT (click = /maintank)")
 
@@ -3121,7 +3291,7 @@ function RefreshMTButtons()
 		if not b then
 			b = CreateFrame("Button", nil, f, "SecureActionButtonTemplate, UIPanelButtonTemplate")
 			b:SetSize(112, 24)
-			b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -344)
+			b:SetPoint("TOPLEFT", 12 + (i - 1) * 118, -314)
 			b:SetAttribute("type", "macro")
 			mtButtons[i] = b
 		end
@@ -3135,16 +3305,16 @@ RefreshMTButtons()
 
 local function BuildChannelButtons()
 	local chLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-	chLabel:SetPoint("TOPLEFT", 16, -376)
+	chLabel:SetPoint("TOPLEFT", 16, -346)
 	chLabel:SetTextColor(THEME.gold[1], THEME.gold[2], THEME.gold[3])
 	chLabel:SetText("LFM channels (click to change, 0 = none):")
 
 	local function GetJoinedChannelList()
 		local list = {}
 		for i = 1, 50 do
-			local num, name = GetChannelName(i)
-			if num and name then
-				list[#list + 1] = num
+			local name = GetChannelName(i)
+			if name then
+				list[#list + 1] = i
 			end
 		end
 		return list
@@ -3167,7 +3337,7 @@ local function BuildChannelButtons()
 	chButtons = {}
 	for i = 1, 3 do
 		local b = CreateMSLButton(f, tostring(db.channels[i] or 0), 70, 24)
-		b:SetPoint("TOPLEFT", 240 + (i - 1) * 78, -390)
+		b:SetPoint("TOPLEFT", 240 + (i - 1) * 78, -360)
 		b:SetScript("OnClick", function(self)
 			local joined = GetJoinedChannelList()
 			local cur = db.channels[i] or 0
@@ -3203,9 +3373,9 @@ local function BuildListPanels()
 local PANEL_LEFT = 8
 local PANEL_MID = 328
 local PANEL_RIGHT = 652
-local PANEL_TOP = -420
-local LIST_TOP = -446
-local LIST_BOTTOM = -654
+local PANEL_TOP = -390
+local LIST_TOP = -416
+local LIST_BOTTOM = -624
 
 local function CreateListHeader(x, w, text)
 	local bar = CreateFrame("Frame", nil, f)
@@ -3247,7 +3417,7 @@ local function CreateListToggle(bar)
 	return b
 end
 
-local candBar, candHeader = CreateListHeader(PANEL_LEFT, PANEL_MID - PANEL_LEFT, "Candidates (whispers)")
+local candBar, candHeader = CreateListHeader(PANEL_LEFT, PANEL_MID - PANEL_LEFT - 22, "Candidates (whispers)")
 local invBar, invHeader = CreateListHeader(PANEL_MID + 4, PANEL_RIGHT - (PANEL_MID + 4), "Invited")
 local listToggle = CreateListToggle(invBar)
 
@@ -3257,7 +3427,7 @@ end
 
 local function UpdateListPanelHeight()
 	local collapsed = db.candCollapsed and db.invCollapsed
-	local target = collapsed and 450 or 870
+	local target = collapsed and 420 or 840
 	if math.floor(f:GetHeight() + 0.5) ~= target then
 		local px, py = f:GetLeft(), f:GetTop()
 		f:ClearAllPoints()
@@ -3304,9 +3474,9 @@ vDivider:SetWidth(1)
 
 candScroll = CreateFrame("ScrollFrame", "MSL201bCandScroll", f, "FauxScrollFrameTemplate")
 candScroll:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_LEFT, LIST_TOP)
-candScroll:SetPoint("TOPRIGHT", f, "TOPLEFT", PANEL_MID - 4, LIST_TOP)
+candScroll:SetPoint("TOPRIGHT", f, "TOPLEFT", PANEL_MID - 4 - 22, LIST_TOP)
 candScroll:SetPoint("BOTTOMLEFT", f, "TOPLEFT", PANEL_LEFT, LIST_BOTTOM)
-candScroll:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", PANEL_MID - 4, LIST_BOTTOM)
+candScroll:SetPoint("BOTTOMRIGHT", f, "TOPLEFT", PANEL_MID - 4 - 22, LIST_BOTTOM)
 candScroll:SetScript("OnVerticalScroll", function(self, offset)
 	FauxScrollFrame_OnVerticalScroll(self, offset, ROW_HEIGHT, RefreshCandidates)
 end)
@@ -3319,6 +3489,7 @@ end)
 candRows = {}
 for i = 1, ROWS_CAND do
 	candRows[i] = CreateRow(f, true)
+	candRows[i]:SetSize(280, ROW_HEIGHT)
 	candRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 10, LIST_TOP - (i - 1) * ROW_HEIGHT)
 end
 
@@ -3351,25 +3522,26 @@ end
 BuildListPanels()
 
 local function BuildFlagPanel()
-	LEECH_PANEL_WIDTH = 300
-	LEECH_ROW_HEIGHT = 24
-	LEECH_MAX_ROWS = 8
+	LEECH_PANEL_WIDTH = 340
+	LEECH_ROW_HEIGHT = 26
+	LEECH_MAX_ROWS = 10
 
 	flagPanel = CreateFrame("Frame", "MSL201bFlagPanel", UIParent)
-	flagPanel:SetSize(LEECH_PANEL_WIDTH, 28 + LEECH_ROW_HEIGHT * LEECH_MAX_ROWS + 36)
+	flagPanel:SetSize(LEECH_PANEL_WIDTH, 34 + LEECH_ROW_HEIGHT * LEECH_MAX_ROWS + 40)
 	flagPanel:SetFrameStrata("DIALOG")
 	flagPanel:SetBackdrop({
-		bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-		edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+		bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+		edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
 		tile = true,
-		tileSize = 16,
-		edgeSize = 16,
-		insets = { left = 4, right = 4, top = 4, bottom = 4 },
+		tileSize = 32,
+		edgeSize = 32,
+		insets = { left = 11, right = 12, top = 12, bottom = 11 },
 	})
 	flagPanel:SetBackdropColor(THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
-	flagPanel:SetBackdropBorderColor(0.8, 0.2, 0.2, 0.9)
+	flagPanel:SetBackdropBorderColor(0.8, 0.2, 0.2, 1)
 	flagPanel:SetPoint("CENTER", UIParent, "CENTER", 250, 0)
 	flagPanel:SetClampedToScreen(true)
+	flagPanel:SetToplevel(true)
 	flagPanel:EnableMouse(true)
 	flagPanel:SetMovable(true)
 	flagPanel:RegisterForDrag("LeftButton")
@@ -3378,22 +3550,54 @@ local function BuildFlagPanel()
 
 	local flagHeaderBar = flagPanel:CreateTexture(nil, "BACKGROUND")
 	flagHeaderBar:SetTexture("Interface\\Buttons\\WHITE8X8")
-	flagHeaderBar:SetVertexColor(0.15, 0.05, 0.05, 1)
-	flagHeaderBar:SetPoint("TOPLEFT", 1, -1)
-	flagHeaderBar:SetPoint("TOPRIGHT", -1, -1)
+	flagHeaderBar:SetVertexColor(0.2, 0.05, 0.05, 1)
+	flagHeaderBar:SetPoint("TOPLEFT", 12, -12)
+	flagHeaderBar:SetPoint("TOPRIGHT", -12, -12)
 	flagHeaderBar:SetHeight(28)
 
 	local flagTitle = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-	flagTitle:SetPoint("TOPLEFT", 10, -8)
+	flagTitle:SetPoint("TOPLEFT", 20, -18)
 	flagTitle:SetText("|cffff4444⚠ Leech / Lvl 59+ Warnings|r")
 
+	flagPanel.flagCount = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	flagPanel.flagCount:SetPoint("LEFT", flagTitle, "RIGHT", 8, 0)
+	flagPanel.flagCount:SetText("")
+
 	local flagClose = CreateFrame("Button", nil, flagPanel, "UIPanelCloseButton")
-	flagClose:SetPoint("TOPRIGHT", -2, -2)
+	flagClose:SetPoint("TOPRIGHT", -8, -8)
 	flagClose:SetScript("OnClick", function() flagPanel:Hide() end)
 
+	local flagClear = CreateMSLButton(flagPanel, "Clear", 52, 20)
+	flagClear:SetPoint("TOPRIGHT", flagClose, "TOPLEFT", -4, 0)
+	flagClear:SetScript("OnClick", function()
+		local names = {}
+		for name in pairs(flaggedPlayers) do
+			names[#names + 1] = name
+		end
+		for _, name in ipairs(names) do
+			UnflagPlayer(name)
+		end
+	end)
+
+	local colBar = flagPanel:CreateTexture(nil, "BACKGROUND")
+	colBar:SetTexture("Interface\\Buttons\\WHITE8X8")
+	colBar:SetVertexColor(0.12, 0.14, 0.2, 1)
+	colBar:SetPoint("TOPLEFT", 12, -44)
+	colBar:SetPoint("TOPRIGHT", -12, -44)
+	colBar:SetHeight(22)
+
+	local colName = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	colName:SetPoint("TOPLEFT", 18, -47)
+	colName:SetTextColor(0.7, 0.78, 0.9)
+	colName:SetText("Player")
+	local colReason = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	colReason:SetPoint("LEFT", colName, "RIGHT", 8, 0)
+	colReason:SetTextColor(0.7, 0.78, 0.9)
+	colReason:SetText("Reason")
+
 	flagScroll = CreateFrame("ScrollFrame", "MSL201bFlagScroll", flagPanel, "FauxScrollFrameTemplate")
-	flagScroll:SetPoint("TOPLEFT", 6, -30)
-	flagScroll:SetPoint("TOPRIGHT", flagPanel, "TOPRIGHT", -22, -30)
+	flagScroll:SetPoint("TOPLEFT", 12, -68)
+	flagScroll:SetPoint("TOPRIGHT", flagPanel, "TOPRIGHT", -22, -68)
 	flagScroll:SetHeight(LEECH_ROW_HEIGHT * LEECH_MAX_ROWS)
 	flagScroll:SetScript("OnVerticalScroll", function(self, offset)
 		FauxScrollFrame_OnVerticalScroll(self, offset, LEECH_ROW_HEIGHT, RefreshFlagPanel)
@@ -3406,7 +3610,7 @@ local function BuildFlagPanel()
 
 	local function CreateFlagRow(parent)
 		local row = CreateFrame("Frame", nil, parent)
-		row:SetSize(LEECH_PANEL_WIDTH - 30, LEECH_ROW_HEIGHT)
+		row:SetSize(LEECH_PANEL_WIDTH - 34, LEECH_ROW_HEIGHT)
 		row.bg = row:CreateTexture(nil, "BACKGROUND")
 		row.bg:SetAllPoints(row)
 		row.bg:SetTexture(1, 1, 1, 0.05)
@@ -3416,13 +3620,13 @@ local function BuildFlagPanel()
 		row:SetScript("OnLeave", function(self) self.bg:Hide() end)
 
 		row.name = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.name:SetPoint("LEFT", 4, 0)
-		row.name:SetWidth(110)
+		row.name:SetPoint("LEFT", 6, 0)
+		row.name:SetWidth(120)
 		row.name:SetJustifyH("LEFT")
 
 		row.reason = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-		row.reason:SetPoint("LEFT", 118, 0)
-		row.reason:SetWidth(60)
+		row.reason:SetPoint("LEFT", 130, 0)
+		row.reason:SetWidth(112)
 		row.reason:SetJustifyH("LEFT")
 
 		row.kick = CreateFrame("Button", nil, row, "UIPanelButtonTemplate")
@@ -3446,8 +3650,13 @@ local function BuildFlagPanel()
 	flagRows = {}
 	for i = 1, LEECH_MAX_ROWS do
 		flagRows[i] = CreateFlagRow(flagPanel)
-		flagRows[i]:SetPoint("TOPLEFT", flagPanel, "TOPLEFT", 6, -30 - (i - 1) * LEECH_ROW_HEIGHT)
+		flagRows[i]:SetPoint("TOPLEFT", flagPanel, "TOPLEFT", 12, -68 - (i - 1) * LEECH_ROW_HEIGHT)
 	end
+
+	local flagFooter = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+	flagFooter:SetPoint("BOTTOMLEFT", 20, 16)
+	flagFooter:SetTextColor(0.55, 0.6, 0.7)
+	flagFooter:SetText("Drag to move · click Kick to remove")
 end
 BuildFlagPanel()
 
@@ -3458,6 +3667,13 @@ function RefreshFlagPanel()
 	end
 	table.sort(list, function(a, b) return a.since < b.since end)
 	local num = #list
+	if flagPanel.flagCount then
+		if num > 0 then
+			flagPanel.flagCount:SetText("|cffff4444" .. num .. " flagged|r")
+		else
+			flagPanel.flagCount:SetText("|cff8888880 flagged|r")
+		end
+	end
 	FauxScrollFrame_Update(flagScroll, num, LEECH_MAX_ROWS, LEECH_ROW_HEIGHT)
 	local offset = FauxScrollFrame_GetOffset(flagScroll)
 	for i = 1, LEECH_MAX_ROWS do
@@ -3467,15 +3683,23 @@ function RefreshFlagPanel()
 			row:Show()
 			row.data = d
 			row.name:SetText(d.name)
-			row.reason:SetText(d.reason)
-			if d.reason == FLAG_IDLE then
+			if d.reason == FLAG.IDLE then
+				row.reason:SetText("Idle")
 				row.reason:SetTextColor(1.0, 0.5, 0.2)
-			elseif d.reason == FLAG_LEECH then
+			elseif d.reason == FLAG.LEECH then
+				row.reason:SetText("Leech")
 				row.reason:SetTextColor(1.0, 0.3, 0.3)
-			elseif d.reason == FLAG_LVL59 then
+			elseif d.reason == FLAG.LVL59 then
+				local lvl = LiveGroupedLevel(d.name)
+				row.reason:SetText(lvl and ("Lvl 59 (" .. lvl .. ")") or "Lvl 59")
 				row.reason:SetTextColor(1.0, 0.8, 0.2)
-			else
+			elseif d.reason == FLAG.LVL60 then
+				local lvl = LiveGroupedLevel(d.name)
+				row.reason:SetText(lvl and ("Lvl 60 (" .. lvl .. ")") or "Lvl 60")
 				row.reason:SetTextColor(1.0, 0.2, 0.2)
+			else
+				row.reason:SetText(d.reason)
+				row.reason:SetTextColor(1.0, 0.5, 0.2)
 			end
 		else
 			row:Hide()
@@ -3625,3 +3849,4 @@ end
 
 RefreshAll()
 PositionMinimap()
+f:Hide()
