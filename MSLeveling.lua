@@ -16,6 +16,7 @@ local db = MSLeveling201bDB
 
 db.channels = db.channels or { 1, 8, 0 }
 db.me = db.me or {}
+db.me.role = db.me.role or "DPS"
 if db.autoReply == nil then
 	db.autoReply = false
 end
@@ -27,6 +28,9 @@ if db.autoLFG == nil then
 end
 if db.autoLFM == nil then
 	db.autoLFM = false
+end
+if db.autoInviteWhisper == nil then
+	db.autoInviteWhisper = false
 end
 if db.enterButtonName == nil then
 	db.enterButtonName = ""
@@ -818,6 +822,13 @@ local function ResetAll()
 	RefreshAll()
 end
 
+local ROLE_ICONS = {
+	Tank = "{circle}",
+	Healer = "{square}",
+	DPS = "{skull}",
+	Aura = "{triangle}",
+}
+
 local function BuildNeedsList(t, h, d, a, tot)
 	local missing = MAX_TOTAL - tot
 	if missing <= 0 or missing > 3 then
@@ -855,21 +866,31 @@ local function BroadcastLFM()
 	local msg, preview
 	if needs then
 		local prefix = "LF" .. missing .. "M"
-		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, needs)
-		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, needs)
+		local iconNeeds = needs
+		for role, icon in pairs(ROLE_ICONS) do
+			iconNeeds = iconNeeds:gsub(role, icon .. role)
+		end
+		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, iconNeeds)
+		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, iconNeeds)
 	else
 		local prefix = "LFM"
 		if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
 			prefix = "LF1M AURA AND GO"
 		end
-		msg = string.format("%s MS Leveling: Tank %d/%d Heal %d/%d DPS %d/%d Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
-		preview = string.format(
-			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+		msg = string.format("%s MS Leveling: %sTank %d/%d %sHeal %d/%d %sDPS %d/%d %sAura %d/%d - reply role + aura/no",
 			prefix,
-			CountColor(t, MAX_TANK), t, MAX_TANK,
-			CountColor(h, MAX_HEAL), h, MAX_HEAL,
-			CountColor(d, MAX_DPS), d, MAX_DPS,
-			CountColor(a, MAX_AURA), a, MAX_AURA
+			ROLE_ICONS.Tank, t, MAX_TANK,
+			ROLE_ICONS.Healer, h, MAX_HEAL,
+			ROLE_ICONS.DPS, d, MAX_DPS,
+			ROLE_ICONS.Aura, a, MAX_AURA
+		)
+		preview = string.format(
+			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: %s|cff66b3ffTank|r |cff%s%d/%d|r %s|cff66b3ffHeal|r |cff%s%d/%d|r %s|cff66b3ffDPS|r |cff%s%d/%d|r %s|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+			prefix,
+			ROLE_ICONS.Tank, CountColor(t, MAX_TANK), t, MAX_TANK,
+			ROLE_ICONS.Healer, CountColor(h, MAX_HEAL), h, MAX_HEAL,
+			ROLE_ICONS.DPS, CountColor(d, MAX_DPS), d, MAX_DPS,
+			ROLE_ICONS.Aura, CountColor(a, MAX_AURA), a, MAX_AURA
 		)
 	end
 	local sent = 0
@@ -1578,7 +1599,7 @@ function HandleWhisper(msg, author)
 		hasSlot, rejectReason = HasSlot(role, aura)
 	end
 	local invitedNow = false
-	if (role or aura) and hasSlot then
+	if (role or aura) and hasSlot and db.autoInviteWhisper then
 		invitedNow = TryAutoInvite(name) or false
 	end
 	if db.autoReply then
@@ -2748,28 +2769,36 @@ local lfmBtn = CreateMSLButton(f, "Post LFM", 96, 22)
 lfmBtn:SetPoint("TOPLEFT", 12, -176)
 lfmBtn:SetScript("OnClick", BroadcastLFM)
 
-local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoLFM: On" or "AutoLFM: Off", 100, 22)
+local autoLFMBtn = CreateMSLButton(f, db.autoLFM and "AutoSPAM-LFM (30s): On" or "AutoSPAM-LFM (30s): Off", 160, 22)
 autoLFMBtn:SetPoint("LEFT", lfmBtn, "RIGHT", 6, 0)
 autoLFMBtn:SetScript("OnClick", function(self)
 	db.autoLFM = not db.autoLFM
 	UpdateAutoButtons()
-	print(PREFIX .. "Auto-LFM (auto-post every 30s): " .. (db.autoLFM and "ON" or "OFF"))
+	print(PREFIX .. "AutoSPAM-LFM (auto-post every 30s): " .. (db.autoLFM and "ON" or "OFF"))
 end)
 
-local autoLFGBtn = CreateMSLButton(f, db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF", 106, 22)
+local autoLFGBtn = CreateMSLButton(f, db.autoLFG and "AutoInviteLFG: On" or "AutoInviteLFG: Off", 118, 22)
 autoLFGBtn:SetPoint("LEFT", autoLFMBtn, "RIGHT", 6, 0)
 autoLFGBtn:SetScript("OnClick", function(self)
 	db.autoLFG = not db.autoLFG
 	UpdateAutoButtons()
-	print(PREFIX .. "Auto-LFG (auto-invite from selected channels): " .. (db.autoLFG and "ON" or "OFF"))
+	print(PREFIX .. "AutoInviteLFG (auto-invite from selected channels): " .. (db.autoLFG and "ON" or "OFF"))
 end)
 
-local autoBtn = CreateMSLButton(f, db.autoReply and "AutoReply: On" or "AutoReply: Off", 100, 22)
+local autoBtn = CreateMSLButton(f, db.autoReply and "AutoReply: On" or "AutoReply: Off", 96, 22)
 autoBtn:SetPoint("LEFT", autoLFGBtn, "RIGHT", 6, 0)
 autoBtn:SetScript("OnClick", function(self)
 	db.autoReply = not db.autoReply
 	UpdateAutoButtons()
 	print(PREFIX .. "Automatic whisper reply: " .. (db.autoReply and "enabled" or "disabled"))
+end)
+
+local autoWhisperBtn = CreateMSLButton(f, db.autoInviteWhisper and "AutoInviteWhisper: On" or "AutoInviteWhisper: Off", 142, 22)
+autoWhisperBtn:SetPoint("LEFT", autoBtn, "RIGHT", 6, 0)
+autoWhisperBtn:SetScript("OnClick", function(self)
+	db.autoInviteWhisper = not db.autoInviteWhisper
+	UpdateAutoButtons()
+	print(PREFIX .. "AutoInviteWhisper (auto-invite from whispers): " .. (db.autoInviteWhisper and "ON" or "OFF"))
 end)
 
 local raidBtn = CreateMSLButton(f, "Load Raid", 96, 22)
@@ -2792,13 +2821,16 @@ end)
 
 UpdateAutoButtons = function()
 	if autoLFMBtn then
-		autoLFMBtn:SetText(db.autoLFM and "AutoLFM: On" or "AutoLFM: Off")
+		autoLFMBtn:SetText(db.autoLFM and "AutoSPAM-LFM (30s): On" or "AutoSPAM-LFM (30s): Off")
 	end
 	if autoLFGBtn then
-		autoLFGBtn:SetText(db.autoLFG and "Auto-LFG: ON" or "Auto-LFG: OFF")
+		autoLFGBtn:SetText(db.autoLFG and "AutoInviteLFG: On" or "AutoInviteLFG: Off")
 	end
 	if autoBtn then
 		autoBtn:SetText(db.autoReply and "AutoReply: On" or "AutoReply: Off")
+	end
+	if autoWhisperBtn then
+		autoWhisperBtn:SetText(db.autoInviteWhisper and "AutoInviteWhisper: On" or "AutoInviteWhisper: Off")
 	end
 end
 UpdateAutoButtons()
@@ -2834,6 +2866,10 @@ CheckAutoOff = function()
 		if db.autoLFG then
 			db.autoLFG = false
 			print(PREFIX .. "Raid full (15/15), Auto-LFG disabled.")
+		end
+		if db.autoInviteWhisper then
+			db.autoInviteWhisper = false
+			print(PREFIX .. "Raid full (15/15), AutoInviteWhisper disabled.")
 		end
 		UpdateAutoButtons()
 	else
@@ -3203,21 +3239,20 @@ local function CreateListToggle(bar)
 	b:GetPushedTexture():SetVertexColor(0.06, 0.08, 0.12, 1)
 	b:SetHighlightTexture("Interface\\Buttons\\WHITE8X8")
 	b:GetHighlightTexture():SetVertexColor(0.22, 0.3, 0.42, 1)
-	local arrow = b:CreateTexture(nil, "OVERLAY")
-	arrow:SetSize(14, 14)
+	local arrow = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
 	arrow:SetPoint("CENTER")
+	arrow:SetText("+")
+	arrow:SetTextColor(0.85, 0.9, 1, 1)
 	b.arrow = arrow
 	return b
 end
 
 local candBar, candHeader = CreateListHeader(PANEL_LEFT, PANEL_MID - PANEL_LEFT, "Candidates (whispers)")
 local invBar, invHeader = CreateListHeader(PANEL_MID + 4, PANEL_RIGHT - (PANEL_MID + 4), "Invited")
-local candToggle = CreateListToggle(candBar)
-local invToggle = CreateListToggle(invBar)
+local listToggle = CreateListToggle(invBar)
 
 local function SetListArrow(btn, expanded)
-	btn.arrow:SetTexture(expanded and "Interface\\Buttons\\ArrowDown" or "Interface\\Buttons\\ArrowRight")
-	btn.arrow:SetVertexColor(0.85, 0.9, 1, 1)
+	btn.arrow:SetText(expanded and "-" or "+")
 end
 
 local function UpdateListPanelHeight()
@@ -3241,27 +3276,20 @@ local function UpdateListPanelHeight()
 	end
 end
 
-local function SetCandCollapsed(collapsed)
+local function SetListsCollapsed(collapsed)
 	db.candCollapsed = collapsed
+	db.invCollapsed = collapsed
 	candScroll:SetShown(not collapsed)
+	invScroll:SetShown(not collapsed)
 	for _, r in ipairs(candRows) do
 		r:SetShown(not collapsed)
 	end
-	SetListArrow(candToggle, not collapsed)
-	if not collapsed then
-		RefreshCandidates()
-	end
-	UpdateListPanelHeight()
-end
-
-local function SetInvCollapsed(collapsed)
-	db.invCollapsed = collapsed
-	invScroll:SetShown(not collapsed)
 	for _, r in ipairs(invRows) do
 		r:SetShown(not collapsed)
 	end
-	SetListArrow(invToggle, not collapsed)
+	SetListArrow(listToggle, not collapsed)
 	if not collapsed then
+		RefreshCandidates()
 		RefreshInvited()
 	end
 	UpdateListPanelHeight()
@@ -3314,22 +3342,18 @@ for i = 1, ROWS_INV do
 	invRows[i]:SetPoint("TOPLEFT", f, "TOPLEFT", 334, LIST_TOP - (i - 1) * ROW_HEIGHT)
 end
 
-candToggle:SetScript("OnClick", function()
-	SetCandCollapsed(not db.candCollapsed)
-end)
-invToggle:SetScript("OnClick", function()
-	SetInvCollapsed(not db.invCollapsed)
+listToggle:SetScript("OnClick", function()
+	SetListsCollapsed(not db.candCollapsed)
 end)
 
-SetCandCollapsed(db.candCollapsed)
-SetInvCollapsed(db.invCollapsed)
+SetListsCollapsed(db.candCollapsed and db.invCollapsed)
 end
 BuildListPanels()
 
 local function BuildFlagPanel()
-	local LEECH_PANEL_WIDTH = 300
-	local LEECH_ROW_HEIGHT = 24
-	local LEECH_MAX_ROWS = 8
+	LEECH_PANEL_WIDTH = 300
+	LEECH_ROW_HEIGHT = 24
+	LEECH_MAX_ROWS = 8
 
 	flagPanel = CreateFrame("Frame", "MSL201bFlagPanel", UIParent)
 	flagPanel:SetSize(LEECH_PANEL_WIDTH, 28 + LEECH_ROW_HEIGHT * LEECH_MAX_ROWS + 36)
@@ -3499,7 +3523,7 @@ mm:RegisterForDrag("LeftButton")
 mm:SetClampedToScreen(true)
 
 local mmIcon = mm:CreateTexture(nil, "ARTWORK")
-mmIcon:SetTexture("Interface\\Icons\\spell_holy_guardianspirit")
+mmIcon:SetTexture("Interface\\Icons\\INV_Misc_GroupNeedMore")
 mmIcon:SetSize(26, 26)
 mmIcon:SetPoint("CENTER", mm, "CENTER", 0, -1)
 

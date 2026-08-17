@@ -16,6 +16,7 @@ local db = MSLeveling201bDB
 
 db.channels = db.channels or { 1, 8, 0 }
 db.me = db.me or {}
+db.me.role = db.me.role or "DPS"
 if db.autoReply == nil then
 	db.autoReply = false
 end
@@ -821,6 +822,13 @@ local function ResetAll()
 	RefreshAll()
 end
 
+local ROLE_ICONS = {
+	Tank = "{circle}",
+	Healer = "{square}",
+	DPS = "{skull}",
+	Aura = "{triangle}",
+}
+
 local function BuildNeedsList(t, h, d, a, tot)
 	local missing = MAX_TOTAL - tot
 	if missing <= 0 or missing > 3 then
@@ -858,21 +866,31 @@ local function BroadcastLFM()
 	local msg, preview
 	if needs then
 		local prefix = "LF" .. missing .. "M"
-		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, needs)
-		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, needs)
+		local iconNeeds = needs
+		for role, icon in pairs(ROLE_ICONS) do
+			iconNeeds = iconNeeds:gsub(role, icon .. role)
+		end
+		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, iconNeeds)
+		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, iconNeeds)
 	else
 		local prefix = "LFM"
 		if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
 			prefix = "LF1M AURA AND GO"
 		end
-		msg = string.format("%s MS Leveling: Tank %d/%d Heal %d/%d DPS %d/%d Aura %d/%d - reply role + aura/no", prefix, t, MAX_TANK, h, MAX_HEAL, d, MAX_DPS, a, MAX_AURA)
-		preview = string.format(
-			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: {circle}|cff66b3ffTank|r |cff%s%d/%d|r {square}|cff66b3ffHeal|r |cff%s%d/%d|r {skull}|cff66b3ffDPS|r |cff%s%d/%d|r {triangle}|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+		msg = string.format("%s MS Leveling: %sTank %d/%d %sHeal %d/%d %sDPS %d/%d %sAura %d/%d - reply role + aura/no",
 			prefix,
-			CountColor(t, MAX_TANK), t, MAX_TANK,
-			CountColor(h, MAX_HEAL), h, MAX_HEAL,
-			CountColor(d, MAX_DPS), d, MAX_DPS,
-			CountColor(a, MAX_AURA), a, MAX_AURA
+			ROLE_ICONS.Tank, t, MAX_TANK,
+			ROLE_ICONS.Healer, h, MAX_HEAL,
+			ROLE_ICONS.DPS, d, MAX_DPS,
+			ROLE_ICONS.Aura, a, MAX_AURA
+		)
+		preview = string.format(
+			"|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling: %s|cff66b3ffTank|r |cff%s%d/%d|r %s|cff66b3ffHeal|r |cff%s%d/%d|r %s|cff66b3ffDPS|r |cff%s%d/%d|r %s|cff66b3ffAura|r |cff%s%d/%d|r |cff66b3ffreply role + aura/no|r",
+			prefix,
+			ROLE_ICONS.Tank, CountColor(t, MAX_TANK), t, MAX_TANK,
+			ROLE_ICONS.Healer, CountColor(h, MAX_HEAL), h, MAX_HEAL,
+			ROLE_ICONS.DPS, CountColor(d, MAX_DPS), d, MAX_DPS,
+			ROLE_ICONS.Aura, CountColor(a, MAX_AURA), a, MAX_AURA
 		)
 	end
 	local sent = 0
