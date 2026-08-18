@@ -6,7 +6,7 @@ group sorting, anti-leech, auto Manastorm entry).
 ## Install
 
 1. Unzip the release into `Interface\AddOns\` so you end up with `Interface\AddOns\MSLeveling 2\`.
-2. `/reload` (or restart the game).
+2. Open WOW Ascension. Close it if you already have it opened.
 3. Open the panel with `/mslv` (or `/msl2`, `/ms201b`).
 
 ## Composition
