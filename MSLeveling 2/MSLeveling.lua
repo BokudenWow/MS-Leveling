@@ -7,7 +7,7 @@ local MSG = {
 	WELCOME_TANK = "Welcome! May your shield be as unbreakable as the walls of Ironforge and every foe kneel to your taunt.",
 	WELCOME_HEAL = "Welcome! May the Holy Light guide your hands, and the fallen always rise again at your call.",
 	WELCOME_OTHER = "Welcome, you have been auto-invited.",
-	REJECT_AURA = "Sorry, the slot is reserved for DPS with an Aura right now. Thanks for your interest!",
+	REJECT_AURA = "Sorry, the slot is reserved for any role with an Aura right now. Thanks for your interest!",
 	REJECT_ROLE_FULL = "Sorry, there is no room for your role right now. Thanks for your interest!",
 	REJECT_GROUP_FULL = "Sorry, the group is currently full. Thanks for your interest!",
 	REJECT_IN_MANASTORM = "Sorry, we are currently inside a Manastorm. Whisper us again when we are between runs. Thanks for your interest!",
@@ -43,6 +43,10 @@ db.compTank = db.compTank or 2
 db.compHeal = db.compHeal or 3
 
 local MAX_TANK, MAX_HEAL, MAX_DPS, MAX_AURA, MAX_TOTAL = 2, 3, 10, 3, 15
+-- A "Pending" invite only reserves a slot during MSL2_PENDING_INVITE.timeout seconds;
+-- after that it is stale (player never accepted) and must not count toward the
+-- raid composition. Stale invites can be retried after MSL2_PENDING_INVITE.reinvite.
+MSL2_PENDING_INVITE = { timeout = 90, reinvite = 10 }
 local function ApplyComp()
 	MAX_TANK = math.max(1, math.min(3, tonumber(db.compTank) or 2))
 	MAX_HEAL = math.max(1, math.min(5, tonumber(db.compHeal) or 3))
@@ -268,7 +272,10 @@ addon:SetScript("OnEvent", function(self, event, ...)
 	elseif event == "CHAT_MSG_SYSTEM" then
 		local msg = ...
 		if type(msg) == "string" then
-			local declineName = msg:match("^(.+) declines? your invite.$") or msg:match("^(.+) has declined your invite.$") or msg:match("^(.+) rechaza? tu invitaci.*n.?$") or msg:match("^(.+) ha rechazado tu invitaci.*n.?$")
+			local declineName = nil
+			if (msg:find("declin") and msg:find("invit")) or (msg:find("rechaz") and msg:find("invit")) then
+				declineName = msg:match("^(%S+)")
+			end
 			if declineName then
 				declineName = declineName:gsub("%-.*", "")
 				for i = #db.invited, 1, -1 do
@@ -519,6 +526,52 @@ local function MergeReply(name, role, aura)
 	end
 end
 
+-- True when the player is currently in our party/raid roster.
+function MSL2_InGroupRoster(name)
+	if not name or name == "" then
+		return false
+	end
+	name = name:gsub("%-.*", "")
+	local pname = UnitName("player")
+	if pname and pname:gsub("%-.*", "") == name then
+		return true
+	end
+	for i = 1, GetNumPartyMembers() do
+		local n = UnitName("party" .. i)
+		if n and n:gsub("%-.*", "") == name then
+			return true
+		end
+	end
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n and n:gsub("%-.*", "") == name then
+			return true
+		end
+	end
+	return false
+end
+
+-- True when an invited entry is still "active": joined, in the roster, or with
+-- a pending invite that has not expired yet. Stale pending entries (never
+-- accepted, e.g. after a disband+re-invite) return false so they neither block
+-- new invites nor inflate the counts.
+function MSL2_HasActiveInvite(name)
+	local inv = FindInvited(name)
+	if not inv then
+		return false
+	end
+	if inv.status == "Joined" then
+		return true
+	end
+	if MSL2_InGroupRoster(name) then
+		return true
+	end
+	if not inv.inviteTime or (GetTime() - inv.inviteTime) < MSL2_PENDING_INVITE.reinvite then
+		return true
+	end
+	return false
+end
+
 local function GetCounts()
 	local t, h, d, a = 0, 0, 0, 0
 	local tot = 0
@@ -533,18 +586,29 @@ local function GetCounts()
 	if db.me.aura then
 		a = a + 1
 	end
+	local now = GetTime()
 	for _, inv in ipairs(db.invited) do
-		if inv.status == "Joined" or inv.status == "Pending" then
+		local active = inv.status == "Joined"
+			or (inv.status == "Pending" and inv.inviteTime ~= nil and (now - inv.inviteTime) < MSL2_PENDING_INVITE.timeout)
+		if active then
 			tot = tot + 1
-			if inv.role == "Tank" then
-				t = t + 1
-			elseif inv.role == "Heal" then
-				h = h + 1
-			elseif inv.role == "DPS" then
-				d = d + 1
-			end
 			if inv.aura then
 				a = a + 1
+			end
+			if inv.role == "Tank" then
+				if t < MAX_TANK then
+					t = t + 1
+				else
+					d = d + 1
+				end
+			elseif inv.role == "Heal" then
+				if h < MAX_HEAL then
+					h = h + 1
+				else
+					d = d + 1
+				end
+			elseif inv.role == "DPS" then
+				d = d + 1
 			end
 		end
 	end
@@ -567,6 +631,36 @@ function FindInvited(name)
 	end
 end
 
+-- True when the only remaining need is an Aura: tanks and heals are full and
+-- every open slot is reserved for a player with an aura.
+function OnlyAuraLeft(t, h, d, a, tot)
+	local needAura = math.max(0, MAX_AURA - a)
+	if needAura == 0 then
+		return false
+	end
+	if tot >= MAX_TOTAL then
+		return false
+	end
+	return t >= MAX_TANK and h >= MAX_HEAL and (MAX_TOTAL - tot) == needAura
+end
+
+-- True when an aura carrier of any role can fill a DPS slot: there is an open
+-- DPS position and either auras are still missing (any open DPS slot is fine)
+-- or, with all auras already present, only the single reserved last DPS spot.
+local function AuraSlotOpen(t, h, d, a, tot)
+	if tot >= MAX_TOTAL then
+		return false
+	end
+	if d >= MAX_DPS then
+		return false
+	end
+	local needAura = math.max(0, MAX_AURA - a)
+	if needAura > 0 then
+		return true
+	end
+	return d >= MAX_DPS - 1
+end
+
 -- Returns true when there is a free slot for this role/aura combo right now,
 -- mirroring the invite-capacity logic (tank/heal caps, DPS aura-reserve spots).
 local function HasSlot(role, aura)
@@ -574,26 +668,27 @@ local function HasSlot(role, aura)
 	if tot >= MAX_TOTAL then
 		return false, MSG.REJECT_GROUP_FULL
 	end
+	if aura == true and OnlyAuraLeft(t, h, d, a, tot) then
+		return true
+	end
+	local needAura = math.max(0, MAX_AURA - a)
+	local auraReserve = needAura + 1
 	if role == "Tank" then
-		if t >= MAX_TANK and not (aura == true and d == MAX_DPS - 1) then return false, MSG.REJECT_ROLE_FULL end
+		if t >= MAX_TANK and not (aura == true and AuraSlotOpen(t, h, d, a, tot)) then return false, MSG.REJECT_ROLE_FULL end
 		return true
 	elseif role == "Heal" then
-		if h >= MAX_HEAL and not (aura == true and d == MAX_DPS - 1) then return false, MSG.REJECT_ROLE_FULL end
+		if h >= MAX_HEAL and not (aura == true and AuraSlotOpen(t, h, d, a, tot)) then return false, MSG.REJECT_ROLE_FULL end
 		return true
 	elseif role == "DPS" then
-		local missing = math.max(0, MAX_AURA - a)
-		local auraReserve = missing + 1
-		if auraReserve < MAX_AURA then
-			auraReserve = MAX_AURA
-		end
 		if aura == true then
-			-- Aura DPS can always fill an open DPS slot, even when we already have 3+ auras.
+			-- An aura DPS fills an open DPS slot (including the reserved ones).
 			if d >= MAX_DPS then
 				return false, MSG.REJECT_ROLE_FULL
 			end
 		else
+			-- Plain DPS can only use the non-reserved DPS slots.
 			if d >= (MAX_DPS - auraReserve) then
-				return false, (a < MAX_AURA and MSG.REJECT_AURA or MSG.REJECT_ROLE_FULL)
+				return false, (needAura > 0 and MSG.REJECT_AURA or MSG.REJECT_ROLE_FULL)
 			end
 		end
 		return true
@@ -777,8 +872,20 @@ local function EnsureRaid()
 end
 
 local function InvitePlayer(name)
-	if FindInvited(name) then
-		return
+	local existing = FindInvited(name)
+	if existing then
+		if existing.status == "Joined" or MSL2_InGroupRoster(name) then
+			if existing.status ~= "Joined" then
+				existing.status = "Joined"
+				existing.inviteTime = nil
+				RefreshAll()
+			end
+			return
+		end
+		if existing.inviteTime and (GetTime() - existing.inviteTime) < MSL2_PENDING_INVITE.reinvite then
+			return
+		end
+		print(PREFIX .. name .. " had a stale pending invite, inviting again.")
 	end
 	EnsureRaid()
 	local idx, cand = FindCandidate(name)
@@ -795,16 +902,23 @@ local function InvitePlayer(name)
 		return
 	end
 	local t, h, d, a = GetCounts()
-	if cand.role == "Tank" and t >= MAX_TANK then
+	if cand.role == "Tank" and t >= MAX_TANK and not (cand.aura == true and AuraSlotOpen(t, h, d, a, tot)) then
 		print(PREFIX .. name .. " is a Tank but the tank slots are full.")
 		return
 	end
-	if cand.role == "Heal" and h >= MAX_HEAL then
+	if cand.role == "Heal" and h >= MAX_HEAL and not (cand.aura == true and AuraSlotOpen(t, h, d, a, tot)) then
 		print(PREFIX .. name .. " is a Heal but the heal slots are full.")
 		return
 	end
 	table.remove(db.candidates, idx)
-	table.insert(db.invited, { name = name, role = cand.role or "?", aura = cand.aura, status = "Pending", inviteTime = GetTime() })
+	if existing then
+		existing.role = cand.role or existing.role or "?"
+		existing.aura = cand.aura
+		existing.status = "Pending"
+		existing.inviteTime = GetTime()
+	else
+		table.insert(db.invited, { name = name, role = cand.role or "?", aura = cand.aura, status = "Pending", inviteTime = GetTime() })
+	end
 	local ok = pcall(InviteUnit, name)
 	if ok then
 		print(PREFIX .. "Invited " .. name .. " (" .. (cand.role or "?") .. (cand.aura and " - Aura" or "") .. ")")
@@ -975,7 +1089,11 @@ local function BuildNeedsList(t, h, d, a, tot)
 		end
 		local n = math.min(item[1], remaining)
 		remaining = remaining - n
-		parts[#parts + 1] = n .. " " .. item[2]
+		local label = item[2]
+		if label == "Aura" then
+			label = "Aura (Any role)"
+		end
+		parts[#parts + 1] = ROLE_ICONS[item[2]] .. n .. " " .. label
 	end
 	if #parts == 0 then
 		return nil
@@ -988,14 +1106,15 @@ local function BroadcastLFM()
 	local missing = MAX_TOTAL - tot
 	local needs = BuildNeedsList(t, h, d, a, tot)
 	local msg, preview
-	if needs then
+	if OnlyAuraLeft(t, h, d, a, tot) then
 		local prefix = "LF" .. missing .. "M"
-		local iconNeeds = needs
-		for role, icon in pairs(ROLE_ICONS) do
-			iconNeeds = iconNeeds:gsub(role, icon .. role)
-		end
-		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, iconNeeds)
-		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, iconNeeds)
+		local auraNeed = ROLE_ICONS.Aura .. missing .. " Aura (Any role)"
+		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, auraNeed)
+		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, auraNeed)
+	elseif needs then
+		local prefix = "LF" .. missing .. "M"
+		msg = string.format("%s MS Leveling %s - reply role + (aura)", prefix, needs)
+		preview = string.format("|cffffd000[MS Leveling]|r |cff66b3ff%s|r MS Leveling %s |cff66b3ff- reply role + (aura)|r", prefix, needs)
 	else
 		local prefix = "LFM"
 		if tot == MAX_TOTAL - 1 and a == MAX_AURA - 1 then
@@ -1071,7 +1190,8 @@ function RefreshStatus()
 	local now = GetTime()
 	for i = #db.invited, 1, -1 do
 		local inv = db.invited[i]
-		if inv.status == "Pending" and inv.inviteTime and (now - inv.inviteTime) > 90 and not names[inv.name] then
+		local expired = inv.inviteTime == nil or (now - inv.inviteTime) > MSL2_PENDING_INVITE.timeout
+		if inv.status == "Pending" and expired and not names[inv.name] then
 			print(PREFIX .. inv.name .. " did not accept the invite (timed out), slot freed.")
 			table.remove(db.invited, i)
 			changed = true
@@ -1144,13 +1264,22 @@ function CleanLeavers(silent)
 		end
 	end
 	local removed = 0
+	local now = GetTime()
 	for i = #db.invited, 1, -1 do
 		local inv = db.invited[i]
 		if not names[inv.name] then
-			print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
-			SendFarewell(inv.name, "Thank you for participating!")
-			table.remove(db.invited, i)
-			removed = removed + 1
+			if inv.status == "Pending" then
+				if inv.inviteTime == nil or (now - inv.inviteTime) > MSL2_PENDING_INVITE.timeout then
+					print(PREFIX .. inv.name .. " did not accept the invite (timed out), slot freed.")
+					table.remove(db.invited, i)
+					removed = removed + 1
+				end
+			else
+				print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
+				SendFarewell(inv.name, "Thank you for participating!")
+				table.remove(db.invited, i)
+				removed = removed + 1
+			end
 		end
 	end
 	local added = 0
@@ -1160,8 +1289,9 @@ function CleanLeavers(silent)
 	end
 	for n in pairs(names) do
 		if n ~= pname and not registered[n] then
-			table.insert(db.invited, { name = n, role = "DPS", aura = false, status = "Joined" })
-			print(PREFIX .. n .. " was in the raid but not registered, added as DPS.")
+			local _, cand = FindCandidate(n)
+			table.insert(db.invited, { name = n, role = cand and cand.role or "DPS", aura = cand and cand.aura ~= nil and cand.aura or false, status = "Joined" })
+			print(PREFIX .. n .. " was in the raid but not registered, added as " .. (cand and cand.role or "DPS") .. ".")
 			added = added + 1
 		end
 	end
@@ -1671,10 +1801,12 @@ function HandleWhisper(msg, author)
 		end
 		return
 	end
-	local isNew = not FindCandidate(name)
-	UpsertCandidate(name, role, aura)
-	if isNew then
-		print(PREFIX .. "New candidate: " .. name .. " (" .. (role or "?") .. (aura == true and " - Aura" or aura == false and " - No aura" or "") .. ")")
+	if role or aura then
+		local isNew = not FindCandidate(name)
+		UpsertCandidate(name, role, aura)
+		if isNew then
+			print(PREFIX .. "New candidate: " .. name .. " (" .. (role or "?") .. (aura == true and " - Aura" or aura == false and " - No aura" or "") .. ")")
+		end
 	end
 	RefreshAll()
 	local blockReason = WhisperBlockReason()
@@ -1790,7 +1922,7 @@ local m = string.lower(msg or "")
 	if role == nil and aura == nil then
 		return
 	end
-	if FindInvited(name) then
+	if MSL2_HasActiveInvite(name) then
 		return
 	end
 	local has, _ = HasSlot(role, aura)
@@ -1870,14 +2002,76 @@ end
 local pendingKicks = {}
 
 function DoKickPlayer(name, reason)
-	local ok = UninviteUnit(name)
-	if ok then
+	if not name or name == "" then
+		print(PREFIX .. "Kick aborted: no name provided.")
+		return
+	end
+	local pname = UnitName("player")
+	if pname and name == pname:gsub("%-.*", "") then
+		print(PREFIX .. "Kick aborted: cannot kick yourself.")
+		return
+	end
+	local fullName
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n and n:gsub("%-.*", "") == name then
+			fullName = n
+			break
+		end
+	end
+	if not fullName then
+		print(PREFIX .. "Kick aborted: " .. name .. " is not in this raid.")
+		return
+	end
+	pcall(UninviteUnit, fullName)
+	if C_PartyInfo and C_PartyInfo.UninviteUnit then
+		pcall(C_PartyInfo.UninviteUnit, fullName)
+	end
+	if not addon.secureKick then
+		addon.secureKick = CreateFrame("Button", nil, UIParent, "SecureActionButtonTemplate")
+		addon.secureKick:SetSize(1, 1)
+		addon.secureKick:SetAttribute("type", "macro")
+		addon.secureKick:Hide()
+	end
+	addon.secureKick:SetAttribute("type", "macro")
+	addon.secureKick:SetAttribute("macrotext", "/uninvite " .. fullName)
+	addon.secureKick:Show()
+	addon.secureKick:Click()
+	addon.secureKick:Hide()
+	addon.secureKick:SetAttribute("type", nil)
+	addon.secureKick:SetAttribute("macrotext", nil)
+	local present = false
+	for i = 1, GetNumRaidMembers() do
+		local n = GetRaidRosterInfo(i)
+		if n and n:gsub("%-.*", "") == name then
+			present = true
+			break
+		end
+	end
+	if not present then
 		RemoveInvited(name)
 		SendFarewell(name, reason or "You have been removed from the raid.")
 		print(PREFIX .. "Kicked " .. name .. " from the raid.")
 		pendingLevel60Kicks[name] = nil
 	else
-		print(PREFIX .. "Could not kick " .. name .. " (protected action, kick manually).")
+		print(PREFIX .. "Kick issued for " .. name .. " - waiting for the player to leave the raid.")
+		After(2, function()
+			local gone = true
+			for j = 1, GetNumRaidMembers() do
+				local n = GetRaidRosterInfo(j)
+				if n and n:gsub("%-.*", "") == name then
+					gone = false
+					break
+				end
+			end
+			if gone then
+				RemoveInvited(name)
+				SendFarewell(name, reason or "You have been removed from the raid.")
+				pendingLevel60Kicks[name] = nil
+			else
+				print(PREFIX .. "Could not kick " .. name .. " (protected action, kick manually).")
+			end
+		end)
 	end
 end
 
@@ -2151,7 +2345,7 @@ function CheckDepartures()
 	local removed = false
 	for i = #db.invited, 1, -1 do
 		local inv = db.invited[i]
-		if not current[inv.name] and lastRosterNames[inv.name] then
+		if inv.status ~= "Pending" and not current[inv.name] and lastRosterNames[inv.name] then
 			table.remove(db.invited, i)
 			removed = true
 			print(PREFIX .. inv.name .. " left the group, removed from the invited list.")
@@ -2183,6 +2377,8 @@ local AFK_CHECK_INTERVAL = 20
 local AFK_WINDOW = 35
 local afkCheckAccum = 0
 local levelPollAccum = 0
+local rosterPollAccum = 0
+MSL2_rosterSyncAccum = 0
 fastLevelPoll = false
 local autoLFMAccum = 0
 local flagRefreshAccum = 0
@@ -2231,6 +2427,27 @@ timerFeature:SetScript("OnUpdate", function(self, dt)
 		if levelPollAccum >= interval then
 			levelPollAccum = 0
 			CheckRaidLevels()
+		end
+	end
+	if IsInRaid() then
+		rosterPollAccum = rosterPollAccum + dt
+		if rosterPollAccum >= 2 then
+			rosterPollAccum = 0
+			if SyncRaidRoster then
+				SyncRaidRoster()
+			end
+			if CheckAutoOff then
+				CheckAutoOff()
+			end
+		end
+	end
+	-- Periodic status sync: keeps pending invites/counts accurate even when no
+	-- GROUP_ROSTER_UPDATE fires (e.g. stale entries after a disband+re-invite).
+	if RefreshStatus then
+		MSL2_rosterSyncAccum = MSL2_rosterSyncAccum + dt
+		if MSL2_rosterSyncAccum >= 5 then
+			MSL2_rosterSyncAccum = 0
+			RefreshStatus()
 		end
 	end
 	if db.autoLFM then
@@ -2513,6 +2730,9 @@ function DoFeatureDisband()
 	end
 	wipe(disbandNames)
 	wipe(disbandInfo)
+	wipe(lastRosterNames)
+	wipe(lastRaidRoster)
+	rosterSeen = false
 	local selfName = (UnitName("player") or ""):gsub("%-.*", "")
 	for i = 1, GetNumRaidMembers() do
 		local n = GetRaidRosterInfo(i)
@@ -3825,7 +4045,7 @@ local function BuildFlagPanel()
 
 	local flagTitle = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontNormal")
 	flagTitle:SetPoint("TOPLEFT", 20, -18)
-	flagTitle:SetText("|cffff4444⚠ Leech / Lvl 59+ Warnings|r")
+	flagTitle:SetText("|cffff4444âš  Leech / Lvl 59+ Warnings|r")
 
 	flagPanel.flagCount = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	flagPanel.flagCount:SetPoint("LEFT", flagTitle, "RIGHT", 8, 0)
@@ -3924,7 +4144,7 @@ local function BuildFlagPanel()
 	local flagFooter = flagPanel:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
 	flagFooter:SetPoint("BOTTOMLEFT", 20, 16)
 	flagFooter:SetTextColor(0.55, 0.6, 0.7)
-	flagFooter:SetText("Drag to move · click Kick to remove")
+	flagFooter:SetText("Drag to move Â· click Kick to remove")
 end
 BuildFlagPanel()
 
